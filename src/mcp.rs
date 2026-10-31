@@ -276,7 +276,7 @@ impl Session {
         if let Some(f) = self.file.clone() {
             match self.write_scene(&f) {
                 Ok(()) => {
-                    let _ = write!(out, "\n\n[Arbeitsdatei aktualisiert: {}]", f.display());
+                    let _ = write!(out, "\n\n[Arbeitsdatei aktualisiert: {}]", disp(&f));
                 }
                 Err(e) => {
                     let _ = write!(out, "\n\n[Speichern fehlgeschlagen: {e}]");
@@ -292,7 +292,7 @@ impl Session {
             camera: self.camera.clone(),
         };
         let s = serde_json::to_string_pretty(&sf).map_err(|e| e.to_string())?;
-        std::fs::write(f, s).map_err(|e| format!("{}: {e}", f.display()))?;
+        std::fs::write(f, s).map_err(|e| format!("{}: {e}", disp(&f)))?;
         self.file_mtime = mtime_of(f);
         Ok(())
     }
@@ -319,11 +319,11 @@ impl Session {
         let parent = norm.parent().ok_or("ungültiger Pfad")?;
         let parent = parent
             .canonicalize()
-            .map_err(|e| format!("{}: {e}", parent.display()))?;
+            .map_err(|e| format!("{}: {e}", disp(&parent)))?;
         if !parent.starts_with(&self.root) {
             return Err(format!(
                 "Pfad liegt außerhalb des freigegebenen Ordners {}",
-                self.root.display()
+                disp(&self.root)
             ));
         }
         let name = norm.file_name().ok_or("Dateiname fehlt")?;
@@ -439,7 +439,7 @@ impl Session {
             );
         }
         if let Some(f) = &self.file {
-            let _ = writeln!(s, "Arbeitsdatei: {}", f.display());
+            let _ = writeln!(s, "Arbeitsdatei: {}", disp(&f));
         }
         s
     }
@@ -473,7 +473,7 @@ impl Session {
                 self.file_mtime = mtime_of(&f);
                 Ok(format!(
                     "Geladen; {} ist jetzt Arbeitsdatei (Änderungen werden dort gespeichert).\n\n{}",
-                    f.display(),
+                    disp(&f),
                     self.info()
                 ))
             }
@@ -489,7 +489,7 @@ impl Session {
                 self.file = Some(f.clone());
                 Ok(format!(
                     "Gespeichert: {} (ab jetzt Arbeitsdatei; die GUI lädt Änderungen automatisch nach)",
-                    f.display()
+                    disp(&f)
                 ))
             }
             Command::ListTemplates => {
@@ -751,10 +751,10 @@ impl Session {
                 match path {
                     Some(p) => {
                         let f = self.resolve(&p, &["tex"])?;
-                        std::fs::write(&f, &tex).map_err(|e| format!("{}: {e}", f.display()))?;
+                        std::fs::write(&f, &tex).map_err(|e| format!("{}: {e}", disp(&f)))?;
                         Ok(format!(
                             "LaTeX geschrieben: {} ({} Zeichen)",
-                            f.display(),
+                            disp(&f),
                             tex.len()
                         ))
                     }
@@ -900,6 +900,15 @@ impl Session {
             c.acos().to_degrees(),
             Self::field_note(&ring)
         ))
+    }
+}
+
+/// Pfad zur Anzeige; ohne das Windows-Präfix `\\?\` aus `canonicalize`.
+fn disp(p: &Path) -> String {
+    let s = p.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC") => rest.to_string(),
+        _ => s,
     }
 }
 
@@ -1461,16 +1470,13 @@ pub fn main(args: &[String]) -> Result<(), String> {
         None => std::env::current_dir().map_err(|e| e.to_string())?,
     };
     if !root.is_dir() {
-        return Err(format!("{} ist kein Ordner", root.display()));
+        return Err(format!("{} ist kein Ordner", disp(&root)));
     }
     let mut sess = Session::new(root);
     if let Some(f) = scene_file {
         sess.apply(Command::LoadScene { path: f })?;
     }
-    eprintln!(
-        "strebwerk MCP-Server bereit (Ordner {})",
-        sess.root.display()
-    );
+    eprintln!("strebwerk MCP-Server bereit (Ordner {})", disp(&sess.root));
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     serve(&mut sess, stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
@@ -1664,5 +1670,18 @@ mod tests {
                 .unwrap_or_default();
             assert!(!e.contains("unknown variant"), "{name}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod disp_tests {
+    #[test]
+    fn windows_praefix() {
+        use std::path::Path;
+        assert_eq!(
+            super::disp(Path::new(r"\\?\C:\Users\x\a.tex")),
+            r"C:\Users\x\a.tex"
+        );
+        assert_eq!(super::disp(Path::new("/tmp/a.tex")), "/tmp/a.tex");
     }
 }
