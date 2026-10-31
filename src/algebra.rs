@@ -1226,15 +1226,31 @@ impl Ring {
         if den.is_zero() {
             return None;
         }
-        let res = self.normalize(Sym { num: sub(&s.num), den });
+        let res = self.normalize(Sym {
+            num: sub(&s.num),
+            den,
+        });
         let desc: Vec<(String, String)> = used
             .iter()
             .map(|j| {
                 let q = vals[*j].clone().unwrap();
-                (format!("{} = {}", self.params[*j].name, self.fmt_q(&q, false)), format!("{} = {}", self.params[*j].name, self.fmt_q(&q, true)))
+                (
+                    format!("{} = {}", self.params[*j].name, self.fmt_q(&q, false)),
+                    format!("{} = {}", self.params[*j].name, self.fmt_q(&q, true)),
+                )
             })
             .collect();
-        Some((res, desc.iter().map(|d| d.0.clone()).collect::<Vec<_>>().join(", "), desc.iter().map(|d| d.1.clone()).collect::<Vec<_>>().join(",\\ ")))
+        Some((
+            res,
+            desc.iter()
+                .map(|d| d.0.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            desc.iter()
+                .map(|d| d.1.clone())
+                .collect::<Vec<_>>()
+                .join(",\\ "),
+        ))
     }
 
     /// Exakte Division in K[Parameter] (None, falls nicht teilbar).
@@ -1512,31 +1528,48 @@ impl Ring {
         }
         // √x = q·g für einen quadratischen Turmgenerator g mit g² = R (z. B. σ₁₀² = 3 − φ):
         // x/R ein Quadrat in K ⇒ √x ∈ K
-        if self.is_param_free(&pr) {
-            for (gi, g) in self.gens.iter().enumerate() {
-                if g.def.degree != 2
-                    || g.relation.t.keys().any(|e| e[gi] > 0)
-                    || !self.is_param_free(&g.relation)
-                {
-                    continue;
-                }
-                if let Some(ir) = self.inv_k(&g.relation) {
-                    if let Some(q) = self.ksqrt(&self.mul(&pr, &ir)) {
-                        let mut e = vec![0; self.n()];
-                        e[gi] = 1;
-                        let mut root = self.mul(&q, &Poly::monomial(e, qi(1)));
-                        if self.eval(&root) < 0.0 {
-                            root = root.neg();
-                        }
-                        outside = self.smul(&outside, &self.sym(root));
-                        let inside = if oddm.is_one() { None } else { Some(oddm) };
-                        return Radical {
-                            outside,
-                            absm,
-                            inside,
-                        };
+        if let Some(root) = self.ksqrt_any(&pr) {
+            outside = self.smul(&outside, &self.sym(root));
+            let inside = if oddm.is_one() { None } else { Some(oddm) };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
+        }
+        // Quadratfaktor u² ∈ K aus dem Leitkoeffizienten ziehen: pr = u²·Q,
+        // z. B. (6 − 4√2)h² + 17 − 12√2 = (√2 − 1)²·(2h² + 3 − 2√2)
+        let mut pr = pr;
+        if self.ng() > 0 {
+            if let Some(lead_k) = self.lead_k(&pr).filter(|k| k.as_constant().is_none()) {
+                for r in [
+                    1i64, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30,
+                ] {
+                    let Some(u) = self.ksqrt_any(&lead_k.scale(&qr(1, r))) else {
+                        continue;
+                    };
+                    if u.as_constant().is_some() {
+                        continue; // rationale Faktoren erledigt der Inhalt unten
+                    }
+                    let Some(iu2) = self.inv_k(&self.mul(&u, &u)) else {
+                        continue;
+                    };
+                    let q = self.mul(&pr, &iu2);
+                    if self.fmt_poly(&q, false).len() < self.fmt_poly(&pr, false).len() {
+                        outside = self.smul(&outside, &self.sym(u));
+                        pr = q;
+                        break;
                     }
                 }
+            }
+            if let Some(k) = self.psqrt(&pr) {
+                outside = self.smul(&outside, &self.sym(k));
+                let inside = if oddm.is_one() { None } else { Some(oddm) };
+                return Radical {
+                    outside,
+                    absm,
+                    inside,
+                };
             }
         }
         // rationaler Inhalt
@@ -1626,6 +1659,57 @@ impl Ring {
             q = q.add(&mono(&mt, &self.mul(&kr, &inv2)));
         }
         None
+    }
+
+    /// Quadratwurzel eines parameterfreien Elements in K, auch über quadratische
+    /// Turmgeneratoren (√(3 − φ) = σ₁₀). Positiv beim aktuellen Wert.
+    pub fn ksqrt_any(&self, x: &Poly) -> Option<Poly> {
+        if !self.is_param_free(x) {
+            return None;
+        }
+        if let Some(r) = self.ksqrt(x) {
+            return Some(r);
+        }
+        for (gi, g) in self.gens.iter().enumerate() {
+            if g.def.degree != 2
+                || g.relation.t.keys().any(|e| e[gi] > 0)
+                || !self.is_param_free(&g.relation)
+            {
+                continue;
+            }
+            let Some(ir) = self.inv_k(&g.relation) else {
+                continue;
+            };
+            if let Some(q) = self.ksqrt(&self.mul(x, &ir)) {
+                let mut e = vec![0; self.n()];
+                e[gi] = 1;
+                let mut root = self.mul(&q, &Poly::monomial(e, qi(1)));
+                if self.eval(&root) < 0.0 {
+                    root = root.neg();
+                }
+                return Some(root);
+            }
+        }
+        None
+    }
+
+    /// K-Koeffizient des führenden Parametermonoms (graduierte Ordnung).
+    fn lead_k(&self, p: &Poly) -> Option<Poly> {
+        let ng = self.ng();
+        let lead = p.t.keys().map(|e| e[ng..].to_vec()).max_by(|a, b| {
+            (a.iter().sum::<u32>(), a.clone()).cmp(&(b.iter().sum::<u32>(), b.clone()))
+        })?;
+        let mut k = Poly::zero();
+        for (e, c) in &p.t {
+            if e[ng..] == lead[..] {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                k = k.add(&Poly::monomial(ek, c.clone()));
+            }
+        }
+        Some(k)
     }
 
     pub fn rad_eval(&self, r: &Radical) -> f64 {
@@ -1835,8 +1919,8 @@ impl Ring {
 
     pub fn fmt_poly(&self, p: &Poly, tex: bool) -> String {
         let mut t = self.poly_terms(p, tex);
-        // führend positiv, sofern möglich (Ordnung sonst unverändert)
-        if t.first().map(|x| x.0).unwrap_or(false) {
+        // führend positiv, sofern möglich – nur ohne Parameter, sonst bleibt die Gradordnung
+        if self.is_param_free(p) && t.first().map(|x| x.0).unwrap_or(false) {
             if let Some(pos) = t.iter().position(|(n, _)| !n) {
                 let x = t.remove(pos);
                 t.insert(0, x);
@@ -1874,6 +1958,49 @@ impl Ring {
     }
 
     pub fn fmt_rad(&self, r: &Radical, tex: bool) -> String {
+        // x/(c·I)·√I  =  x/(c·√I); rationalen Inhalt g von I mit √g ∈ K in c ziehen und x/c in K kürzen
+        if let (Some(i), None, false) = (&r.inside, &r.absm, r.outside.den.is_one()) {
+            if let Some(mut c) = self
+                .pdiv(&r.outside.den, i)
+                .filter(|c| self.is_param_free(c))
+            {
+                let mut i = i.clone();
+                let mut g = BigInt::zero();
+                let mut l = BigInt::one();
+                for q in i.t.values() {
+                    g = g.gcd(q.numer());
+                    l = l.lcm(q.denom());
+                }
+                let content = Q::new(g, l);
+                if !content.is_one() && !content.is_zero() {
+                    if let Some(sg) = self.ksqrt_any(&self.c(content.clone())) {
+                        c = self.mul(&c, &sg);
+                        i = i.scale(&content.recip());
+                    }
+                }
+                let (num, cs) = match self.inv_k(&c) {
+                    Some(ic) => (self.mul(&r.outside.num, &ic), String::new()),
+                    None => (r.outside.num.clone(), self.wrap(&c, tex)),
+                };
+                let ns = self.fmt_poly(&num, tex);
+                let is = self.fmt_poly(&i, tex);
+                return if tex {
+                    format!(
+                        "\\frac{{{ns}}}{{{cs}{}\\sqrt{{{is}}}}}",
+                        if cs.is_empty() { "" } else { "\\," }
+                    )
+                } else {
+                    let n = if self.poly_terms(&num, false).len() > 1 {
+                        format!("({ns})")
+                    } else {
+                        ns
+                    };
+                    format!("{n}/({cs}{}√({is}))", if cs.is_empty() { "" } else { "·" })
+                        .replace("/(√(", "/√(")
+                        .replace("))", ")")
+                };
+            }
+        }
         let mut factors: Vec<String> = vec![];
         let mut neg = false;
         // Vorfaktor
@@ -1893,7 +2020,7 @@ impl Ring {
             }
         } else {
             pre = self.fmt_sym(out, tex);
-            if !tex {
+            if !tex && (r.inside.is_some() || r.absm.is_some()) {
                 pre = format!("({pre})");
             }
         }

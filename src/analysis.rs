@@ -276,8 +276,10 @@ fn exact_section(
             pnum.push(q);
         }
     };
+    // nur Ecken der Hülle (nicht der angehängte Schwerpunkt)
+    let on_hull: BTreeSet<usize> = b.hull_faces.iter().flatten().cloned().collect();
     for (i, v) in ex.iter().enumerate() {
-        if zero[i] {
+        if zero[i] && on_hull.contains(&i) {
             push(v.clone(), &mut pts, &mut pnum);
         }
     }
@@ -1456,18 +1458,38 @@ mod tests {
         let txt = std::fs::read_to_string("examples/anti-rho3.strebwerk").unwrap();
         let f: crate::app::SaveFile = serde_json::from_str(&txt).unwrap();
         let mut cache = Cache::new();
-        let built: Vec<(Obj, Built)> = f.scene.objects.iter().map(|o| (o.clone(), build(o, &f.scene, &mut cache))).collect();
+        let built: Vec<(Obj, Built)> = f
+            .scene
+            .objects
+            .iter()
+            .map(|o| (o.clone(), build(o, &f.scene, &mut cache)))
+            .collect();
         let vis: Vec<(&Obj, &Built)> = built.iter().map(|(o, b)| (o, b)).collect();
         let (secs, _, inters) = analyze_all(&f.scene, &vis, true);
         let (bs, _) = bundles(&inters[0].crossings);
         assert_eq!(bs.len(), 1);
         let b = &bs[0];
         assert!(b.p.p.length() < 1e-12);
+        assert_eq!(b.p.uni, "(0, 0, 0)", "Bündelpunkt soll exakt sein");
+        // Speichen haben jetzt exakte Innenlängen
+        assert!(inters[0]
+            .pierces
+            .iter()
+            .filter(|p| p.label == "Speiche")
+            .all(|p| !p.total_uni.starts_with('≈')));
         // keine doppelten Winkel (Speichen liegen auf den Raumdiagonalen)
-        assert_eq!(b.angles.len(), 10, "{:?}", b.angles.iter().map(|a| a.2).collect::<Vec<_>>());
+        assert_eq!(
+            b.angles.len(),
+            10,
+            "{:?}",
+            b.angles.iter().map(|a| a.2).collect::<Vec<_>>()
+        );
         assert!(b.angles.iter().all(|a| a.1.len() < 400), "Ausdruck zu lang");
         // Mittelschnitt des Antiprismas: Zehneck mit Umfang 5σ₁₀, unabhängig von h
-        let z0 = secs.iter().find(|r| r.plane == 0 && r.obj.starts_with("Antiprisma")).unwrap();
+        let z0 = secs
+            .iter()
+            .find(|r| r.plane == 0 && r.obj.starts_with("Antiprisma"))
+            .unwrap();
         assert_eq!((z0.ngon, z0.perim_uni.as_str()), (10, "5σ₁₀"));
     }
 }

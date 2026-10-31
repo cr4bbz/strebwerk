@@ -976,9 +976,34 @@ pub fn gen_keys_of(strs: &[&String], scene: &Scene) -> Result<BTreeSet<String>, 
 
 /// Exakte Ecken im selben Indexraum wie `Built::verts` (inkl. Verschiebung), im Ring `r`.
 pub fn exact_verts(obj: &Obj, r: &Ring) -> Result<Vec<V3>, String> {
+    let with_center = obj.layers.spokes || obj.layers.cone_tet;
+    let avg = |pts: &[V3]| -> V3 {
+        let mut s = pts[0].clone();
+        for p in &pts[1..] {
+            s = poly::v3_add(r, &s, p);
+        }
+        poly::v3_scale(r, &s, &r.sym_c(qr(1, pts.len() as i64)))
+    };
     let mut v = match &obj.kind {
-        Kind::Polyhedron { base, ops } => poly_exact(base, ops, r)?.0,
-        Kind::Free { pts, .. } => free_exact(pts, r)?,
+        Kind::Polyhedron { base, ops } => {
+            let mut v = poly_exact(base, ops, r)?.0;
+            if with_center {
+                let c = avg(&v);
+                v.push(c);
+            }
+            v
+        }
+        Kind::Free { pts, hull, .. } => {
+            let mut v = free_exact(pts, r)?;
+            if *hull && with_center && v.len() >= 4 {
+                let num: Vec<DVec3> = v.iter().map(|p| poly::v3_eval(r, p)).collect();
+                let keep = poly::dedupe(&num);
+                let kept: Vec<V3> = keep.iter().map(|i| v[*i].clone()).collect();
+                let c = avg(&kept);
+                v.push(c);
+            }
+            v
+        }
         _ => {
             return Err(format!(
                 "{} hat keine exakten Koordinaten",
@@ -1263,8 +1288,23 @@ fn emit_polyhedron(
         }
     }
     if l.spokes || l.cone_tet {
+        // Eckenschwerpunkt als zusätzliche (exakte) Ecke am Ende von `verts`,
+        // `exact_verts` hängt ihn in derselben Weise an
+        let ci = b.verts.len();
+        b.verts.push(center);
         let col = Color32::from_rgb(200, 200, 210);
-        for p in num {
+        for (i, p) in num.iter().enumerate() {
+            let sref = if b.exact_ok {
+                b.struts.push(StrutRef {
+                    i: ci,
+                    j: i,
+                    label: "Speiche".into(),
+                    tex: "s".into(),
+                });
+                Some(b.struts.len() - 1)
+            } else {
+                None
+            };
             b.lines.push(RLine {
                 a: center,
                 b: *p,
@@ -1273,7 +1313,7 @@ fn emit_polyhedron(
                 faces: vec![],
                 strut: true,
                 inter: Some("Speiche".into()),
-                sref: None,
+                sref,
             });
         }
         b.points.push(RPoint {
@@ -1291,6 +1331,17 @@ fn emit_polyhedron(
         for f in &hull.faces {
             tets += f.len() - 2;
             for t in 2..f.len() - 1 {
+                let sref = if b.exact_ok {
+                    b.struts.push(StrutRef {
+                        i: f[0],
+                        j: f[t],
+                        label: "Tetraederkante".into(),
+                        tex: "t".into(),
+                    });
+                    Some(b.struts.len() - 1)
+                } else {
+                    None
+                };
                 b.lines.push(RLine {
                     a: num[f[0]],
                     b: num[f[t]],
@@ -1299,7 +1350,7 @@ fn emit_polyhedron(
                     faces: vec![],
                     strut: true,
                     inter: Some("Tetraederkante".into()),
-                    sref: None,
+                    sref,
                 });
             }
         }
@@ -1619,16 +1670,23 @@ fn build_free(
             }
         }
         // Indizes der Hülle (num2) auf die Originalpunkte zurückführen
+        // Schwerpunkt (falls angehängt) bleibt die letzte Ecke
+        let center_extra = b.verts.len() > num2.len();
+        let remap = |i: usize| if i < keep.len() { keep[i] } else { num.len() };
         for st in &mut b.struts {
-            st.i = keep[st.i];
-            st.j = keep[st.j];
+            st.i = remap(st.i);
+            st.j = remap(st.j);
         }
         b.hull_faces = b
             .hull_faces
             .iter()
             .map(|f| f.iter().map(|i| keep[*i]).collect())
             .collect();
+        let c = b.verts.last().cloned();
         b.verts = num.clone();
+        if center_extra {
+            b.verts.push(c.unwrap());
+        }
         b.exact_ok = exact_ok;
         for (p, q) in &valid_struts {
             b.struts.push(StrutRef {
@@ -2850,5 +2908,42 @@ mod tests {
         // √(3 − φ) liegt im Körper: σ₁₀; √(2 + φ) = φσ₁₀
         assert_eq!(line(&b, "Kante ℓ₂").uni, "σ₁₀");
         assert_eq!(line(&b, "Flächendiagonale").uni, "φσ₁₀");
+    }
+
+    /// Quadratfaktoren aus K-Koeffizienten: Diederwinkel Quadrat/Fünfeck–Dreieck der Antiprismen
+    #[test]
+    fn antiprism_dihedral_simplified() {
+        let mk = |n: u32| {
+            let mut sc = default_scene();
+            sc.objects.clear();
+            sc.add(
+                "A",
+                Kind::Polyhedron {
+                    base: PolyBase::Antiprism {
+                        n,
+                        r: "1".into(),
+                        h: "h".into(),
+                    },
+                    ops: vec![],
+                },
+            );
+            let mut cache = Cache::new();
+            build(&sc.objects[0], &sc, &mut cache)
+        };
+        let b4 = mk(4);
+        assert_eq!(
+            line(&b4, "Diederwinkel θ₁").uni,
+            "cos θ = (1 − √2)/√(2h² + 3 − 2√2)"
+        );
+        assert!(line(&b4, "Symmetriegruppe")
+            .uni
+            .starts_with("D₄d, Ordnung 16"));
+        let b5 = mk(5);
+        assert_eq!(
+            line(&b5, "Diederwinkel θ₁").uni,
+            "cos θ = (φ − 2)/√(4h² + 5 − 3φ)"
+        );
+        // Dreiecksfläche mit herausgezogenem σ₁₀
+        assert_eq!(line(&b5, "Flächeninhalt A₁").uni, "1/4·σ₁₀√(4h² + 5 − 3φ)");
     }
 }
