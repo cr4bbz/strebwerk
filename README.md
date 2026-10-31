@@ -104,7 +104,11 @@ Datei in der GUI geöffnet, lädt sie Änderungen sofort nach (solange dort nich
 sonst bietet *Datei ▸ Neu laden* es an). Umgekehrt übernimmt der Server vor jedem Befehl, was in der
 GUI gespeichert wurde (*Datei ▸ Speichern*).
 
-**Einrichten in Claude Desktop** (Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
+**Einrichten unter Windows, automatisch**: `powershell -ExecutionPolicy Bypass -File tools\mcp-einrichten.ps1`
+holt den Branch, baut, testet den Server über das Protokoll und trägt ihn (mit Sicherungskopie)
+in die Claude-Desktop-Konfiguration ein. Danach Claude Desktop ganz beenden und neu starten.
+
+**Einrichten in Claude Desktop von Hand** (Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
 
 ```json
 {
