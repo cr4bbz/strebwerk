@@ -988,7 +988,11 @@ impl Ring {
             return None;
         }
         if let Some(c) = x.as_constant() {
-            return rational_sqrt(&c).map(|r| self.c(r));
+            if let Some(r) = rational_sqrt(&c) {
+                return Some(self.c(r));
+            }
+            // rationale Zahl, deren Wurzel in einem einfachen Generator liegt (√2 ∈ ℚ(√2), √5 ∈ ℚ(φ) …)
+            return (0..self.ng()).find_map(|gi| self.ksqrt_in(x, gi));
         }
         let ng = self.ng();
         let used: BTreeSet<usize> =
@@ -998,7 +1002,11 @@ impl Ring {
         if used.len() != 1 {
             return None;
         }
-        let gi = *used.iter().next().unwrap();
+        self.ksqrt_in(x, *used.iter().next().unwrap())
+    }
+
+    /// Wurzel eines Elements von ℚ(g_gi) in ℚ(g_gi), über die Konjugierten gesucht und exakt geprüft.
+    fn ksqrt_in(&self, x: &Poly, gi: usize) -> Option<Poly> {
         let g = &self.gens[gi];
         if g.def.qpoly.is_none() || g.roots.len() != g.def.degree as usize {
             return None;
@@ -1255,16 +1263,14 @@ impl Ring {
         };
         let oddm = self.param_mono(&odd);
 
-        if self.is_param_free(&pr) {
-            if let Some(k) = self.ksqrt(&pr) {
-                outside = self.smul(&outside, &self.sym(k));
-                let inside = if oddm.is_one() { None } else { Some(oddm) };
-                return Radical {
-                    outside,
-                    absm,
-                    inside,
-                };
-            }
+        if let Some(k) = self.psqrt(&pr) {
+            outside = self.smul(&outside, &self.sym(k));
+            let inside = if oddm.is_one() { None } else { Some(oddm) };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
         }
         // rationaler Inhalt
         let mut gnum = BigInt::zero();
@@ -1291,6 +1297,68 @@ impl Ring {
             absm,
             inside,
         }
+    }
+
+    /// Quadratwurzel in K[Parameter], falls `p` ein Quadrat ist (Leitterm-Verfahren in
+    /// graduierter Ordnung, Ergebnis exakt geprüft). Vorzeichen: positiv beim aktuellen Wert.
+    pub fn psqrt(&self, p: &Poly) -> Option<Poly> {
+        if p.is_zero() {
+            return Some(Poly::zero());
+        }
+        if self.is_param_free(p) {
+            return self.ksqrt(p);
+        }
+        let ng = self.ng();
+        let split = |q: &Poly| -> BTreeMap<Vec<u32>, Poly> {
+            let mut g: BTreeMap<Vec<u32>, Poly> = BTreeMap::new();
+            for (e, c) in &q.t {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                let ent = g.entry(e[ng..].to_vec()).or_default();
+                *ent = ent.add(&Poly::monomial(ek, c.clone()));
+            }
+            g
+        };
+        let ord = |m: &Vec<u32>| (m.iter().sum::<u32>(), m.clone());
+        let lead = |q: &Poly| -> Option<(Vec<u32>, Poly)> {
+            split(q)
+                .into_iter()
+                .max_by(|a, b| ord(&a.0).cmp(&ord(&b.0)))
+        };
+        let mono = |m: &[u32], k: &Poly| -> Poly {
+            let mut e = vec![0u32; self.n()];
+            e[ng..].copy_from_slice(m);
+            self.mul(k, &Poly::monomial(e, qi(1)))
+        };
+        let (m0, k0) = lead(p)?;
+        if m0.iter().any(|x| x % 2 == 1) {
+            return None;
+        }
+        let kq = self.ksqrt(&k0)?;
+        let mq: Vec<u32> = m0.iter().map(|x| x / 2).collect();
+        let mut q = mono(&mq, &kq);
+        let inv2 = self.inv_k(&kq.scale(&qi(2)))?;
+        for _ in 0..200 {
+            let rem = p.sub(&self.mul(&q, &q));
+            if rem.is_zero() {
+                if self.eval(&q) < 0.0 {
+                    q = q.neg();
+                }
+                return Some(q);
+            }
+            let (mr, kr) = lead(&rem)?;
+            if mr.iter().zip(&mq).any(|(a, b)| a < b) {
+                return None;
+            }
+            let mt: Vec<u32> = mr.iter().zip(&mq).map(|(a, b)| a - b).collect();
+            if ord(&mt) >= ord(&mq) {
+                return None;
+            }
+            q = q.add(&mono(&mt, &self.mul(&kr, &inv2)));
+        }
+        None
     }
 
     pub fn rad_eval(&self, r: &Radical) -> f64 {
@@ -1539,6 +1607,8 @@ impl Ring {
                 if t[0].1 != "1" || (r.inside.is_none() && r.absm.is_none()) {
                     pre = t[0].1.clone();
                 }
+            } else if r.inside.is_none() && r.absm.is_none() {
+                pre = self.fmt_poly(&out.num, tex);
             } else {
                 pre = self.wrap(&out.num, tex);
             }
@@ -1586,7 +1656,15 @@ impl Ring {
                         .next()
                         .map(|c| c.is_ascii_digit())
                         .unwrap_or(false);
-                    if prev_digit && next_digit || f.starts_with('(') && i > 0 && s.ends_with(')') {
+                    let fraction = prev_digit
+                        && s.rsplit(['·', ' '])
+                            .next()
+                            .map(|w| w.contains('/'))
+                            .unwrap_or(false);
+                    if prev_digit && next_digit
+                        || fraction
+                        || f.starts_with('(') && i > 0 && s.ends_with(')')
+                    {
                         s.push('·');
                     }
                 }
@@ -1721,6 +1799,23 @@ mod tests {
         let x = r.mul(&r.c(qi(12)), &r.mul(&a, &a));
         let rad = r.sqrt(&r.sym(x));
         assert_eq!(r.fmt_rad(&rad, false), "2a√3");
+    }
+
+    #[test]
+    fn poly_sqrt() {
+        let r = ring(&["sqrt2"], &["a", "b"]);
+        let a = r.param_poly("a").unwrap();
+        let b = r.param_poly("b").unwrap();
+        let s2 = r.gen_poly("sqrt2").unwrap();
+        // (√2·a + b)² hat die Wurzel √2·a + b
+        let q = r.mul(&s2, &a).add(&b);
+        let sq = r.psqrt(&r.mul(&q, &q)).unwrap();
+        assert_eq!(sq, q);
+        // a² + b² ist kein Quadrat
+        assert!(r.psqrt(&r.mul(&a, &a).add(&r.mul(&b, &b))).is_none());
+        // √(2(a + b)²) = √2·(a + b), denn 2 ist in ℚ(√2) ein Quadrat
+        let x = r.mul(&r.c(qi(2)), &r.pow(&a.add(&b), 2));
+        assert_eq!(r.fmt_rad(&r.sqrt(&r.sym(x)), false), "a√2 + b√2");
     }
 
     #[test]

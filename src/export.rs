@@ -1,7 +1,8 @@
 //! Export: Formeln als LaTeX, aktuelle Ansicht als TikZ, Gerüst als STL.
 
+use crate::analysis::{self, InterRes, Profile, SectionRes};
 use crate::render::{Item, Prim};
-use crate::scene::{Built, Obj};
+use crate::scene::{Built, Obj, Scene};
 use eframe::egui::{Color32, Pos2};
 use glam::DVec3;
 use std::collections::HashMap;
@@ -26,40 +27,379 @@ fn clean_label(s: &str) -> String {
     out
 }
 
-/// LaTeX-Block für ein Objekt (ohne Präambel).
+/// Unicode-Text (wie er in der Oberfläche steht) für LaTeX-Textmodus aufbereiten.
+pub fn tex_text(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let m = |x: &str| format!("\\ensuremath{{{x}}}");
+        let piece = match c {
+            '&' | '%' | '$' | '#' | '_' | '{' | '}' => format!("\\{c}"),
+            '\\' => "\\textbackslash{}".into(),
+            '^' => "\\^{}".into(),
+            '~' => "\\~{}".into(),
+            'χ' => m("\\chi"),
+            'π' => m("\\pi"),
+            'φ' => m("\\varphi"),
+            'ρ' => m("\\rho"),
+            'κ' => m("\\kappa"),
+            'τ' => m("\\tau"),
+            'α' => m("\\alpha"),
+            'β' => m("\\beta"),
+            'θ' => m("\\theta"),
+            'γ' => m("\\gamma"),
+            'σ' => m("\\sigma"),
+            'λ' => m("\\lambda"),
+            'μ' => m("\\mu"),
+            'Σ' => m("\\Sigma"),
+            '√' => {
+                // √(…) oder √x
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    let mut inner = String::new();
+                    for d in chars.by_ref() {
+                        match d {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        inner.push(d);
+                    }
+                    format!("\\ensuremath{{\\sqrt{{\\text{{{}}}}}}}", tex_text(&inner))
+                } else {
+                    let mut inner = String::new();
+                    while let Some(d) = chars.peek() {
+                        if d.is_ascii_alphanumeric() || "φρσγα".contains(*d) {
+                            inner.push(*d);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    format!("\\ensuremath{{\\sqrt{{\\text{{{}}}}}}}", tex_text(&inner))
+                }
+            }
+            '·' | '⋅' => m("\\cdot "),
+            '×' => m("\\times "),
+            '≈' => m("\\approx "),
+            '≤' => m("\\leq "),
+            '≥' => m("\\geq "),
+            '⇒' => m("\\Rightarrow "),
+            '→' => m("\\to "),
+            '↔' => m("\\leftrightarrow "),
+            '∫' => m("\\int "),
+            '∬' => m("\\iint "),
+            '−' => m("-"),
+            '–' => "--".into(),
+            '°' => m("^\\circ"),
+            'ℝ' => m("\\mathbb{R}"),
+            'ℓ' => m("\\ell"),
+            '²' => m("^2"),
+            '³' => m("^3"),
+            '⁴' => m("^4"),
+            '⁵' => m("^5"),
+            '⁶' => m("^6"),
+            'ᶠ' => m("^f"),
+            '₀'..='₉' => m(&format!("_{}", c as u32 - '₀' as u32)),
+            'ₕ' => m("_h"),
+            'ᵥ' => m("_v"),
+            'ₛ' => m("_s"),
+            'ᵢ' => m("_i"),
+            '⅓' => m("\\tfrac13"),
+            '…' => "\\ldots{}".into(),
+            '„' => ",,".into(),
+            '“' => "``".into(),
+            c if (c as u32) < 0x250 => c.to_string(),
+            _ => String::new(),
+        };
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// LaTeX-Block für ein Objekt (ohne Präambel): Formelzeilen im align*-Block,
+/// reine Textzeilen (Topologie, Symmetrie, Fáry–Milnor …) als Absätze an ihrer Stelle.
 pub fn latex_object(o: &Obj, b: &Built) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "\\subsection*{{{}}}", clean_label(&o.name));
     for d in &b.def_tex {
         let _ = writeln!(s, "\\[ {d} \\]");
     }
-    let lines: Vec<String> = b
-        .formulas
-        .iter()
-        .filter(|l| !l.tex.is_empty())
-        .map(|l| format!("  {} && \\text{{{}}}", l.tex, clean_label(&l.label)))
-        .collect();
-    if !lines.is_empty() {
+    let mut block: Vec<String> = vec![];
+    let flush = |s: &mut String, block: &mut Vec<String>| {
+        if !block.is_empty() {
+            let _ = writeln!(
+                s,
+                "\\begin{{align*}}\n{}\n\\end{{align*}}",
+                block.join(" \\\\\n")
+            );
+            block.clear();
+        }
+    };
+    for l in &b.formulas {
+        if l.tex.is_empty() {
+            flush(&mut s, &mut block);
+            let _ = writeln!(
+                s,
+                "\\noindent\\textbf{{{}:}} {}\\par",
+                clean_label(&l.label),
+                tex_text(&l.uni)
+            );
+        } else {
+            block.push(format!(
+                "  {} && \\text{{{}}}",
+                l.tex,
+                clean_label(&l.label)
+            ));
+            // Klassifikation zur Topologie zusätzlich als Text
+            if l.label.starts_with("Topologie") || l.label.starts_with("Geschlossene") {
+                flush(&mut s, &mut block);
+                let _ = writeln!(s, "\\noindent {}\\par", tex_text(&l.uni));
+            }
+        }
+    }
+    flush(&mut s, &mut block);
+    if !b.errors.is_empty() {
         let _ = writeln!(
             s,
-            "\\begin{{align*}}\n{}\n\\end{{align*}}",
-            lines.join(" \\\\\n")
+            "\\noindent\\emph{{Fehler: {}}}\\par",
+            tex_text(&b.errors.join("; "))
         );
     }
     if !b.legend_tex.is_empty() {
-        let _ = writeln!(s, "mit ${}$.", b.legend_tex.join(",\\quad "));
+        let _ = writeln!(
+            s,
+            "\\noindent mit ${}$.\\par",
+            b.legend_tex.join(",\\quad ")
+        );
     }
     s
 }
 
-pub fn latex_document(objs: &[(&Obj, &Built)]) -> String {
+fn latex_sections(scene: &Scene, secs: &[SectionRes], profs: &[Profile]) -> String {
+    let mut s = String::new();
+    if scene.sections.iter().all(|e| !e.visible) {
+        return s;
+    }
+    let _ = writeln!(s, "\\section*{{Schnittebenen}}");
+    for (pi, sec) in scene.sections.iter().enumerate().filter(|(_, e)| e.visible) {
+        let _ = writeln!(
+            s,
+            "\\subsection*{{{}: ${}$}}",
+            clean_label(&sec.name),
+            analysis::plane_text(sec, true)
+        );
+        let rs: Vec<&SectionRes> = secs.iter().filter(|r| r.plane == pi).collect();
+        if rs.is_empty() {
+            let _ = writeln!(s, "Die Ebene trifft kein sichtbares Objekt.\\par");
+        }
+        for r in rs {
+            let shape = if r.exact {
+                format!("exaktes {}-Eck", r.ngon)
+            } else if r.loops > 1 {
+                format!("{} Schnittkurven, numerisch", r.loops)
+            } else {
+                "numerisch".to_string()
+            };
+            let _ = writeln!(
+                s,
+                "\\paragraph{{{}}} ({})\n\\begin{{align*}}\n  A &= {} \\\\\n  U &= {}\n\\end{{align*}}",
+                clean_label(&r.obj),
+                shape,
+                r.area_tex,
+                r.perim_tex
+            );
+            if r.exact && !r.points.is_empty() {
+                let pts: Vec<String> = r
+                    .points
+                    .iter()
+                    .take(12)
+                    .map(|p| format!("${}$", p.tex))
+                    .collect();
+                let more = if r.points.len() > 12 {
+                    format!(", \\ldots{{}} ({} insgesamt)", r.points.len())
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(
+                    s,
+                    "\\noindent Ecken des Schnittpolygons: {}{}.\\par",
+                    pts.join(", "),
+                    more
+                );
+                let _ = writeln!(s, "\\noindent\\emph{{Gültig, solange die Ebene dieselben Kanten schneidet (gleicher kombinatorischer Typ).}}\\par");
+            }
+            if !r.note.is_empty() {
+                let _ = writeln!(s, "\\noindent\\emph{{{}}}\\par", tex_text(&r.note));
+            }
+        }
+        for p in profs.iter().filter(|p| p.plane == pi) {
+            let coords: Vec<String> = p
+                .samples
+                .iter()
+                .map(|(h, a)| format!("({h:.5},{a:.5})"))
+                .collect();
+            let rel = if p.volume > 0.0 {
+                (p.integral - p.volume).abs() / p.volume * 100.0
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                s,
+                "\\paragraph{{Cavalieri-Profil {}}}\n\\begin{{center}}\\begin{{tikzpicture}}\n\\begin{{axis}}[width=0.8\\linewidth,height=5cm,xlabel={{$h$}},ylabel={{$A(h)$}},grid=major,thick]\n\\addplot[blue!70!black,mark=none] coordinates {{{}}};\n\\addplot[red!70!black,dashed] coordinates {{({:.5},0) ({:.5},{:.5})}};\n\\end{{axis}}\n\\end{{tikzpicture}}\\end{{center}}\n\\noindent $\\int A(h)\\,dh \\approx {:.6}$, Volumen aus dem Netz $\\approx {:.6}$ (Abweichung {:.3}\\,\\%).\\par",
+                clean_label(&p.obj),
+                coords.join(" "),
+                p.current,
+                p.current,
+                p.samples.iter().map(|x| x.1).fold(0.0, f64::max) * 1.05,
+                p.integral,
+                p.volume,
+                rel
+            );
+        }
+    }
+    s
+}
+
+fn latex_interactions(inters: &[InterRes]) -> String {
+    let mut s = String::new();
+    if inters.is_empty() {
+        return s;
+    }
+    let _ = writeln!(s, "\\section*{{Interaktionen der Verstrebungen}}");
+    for r in inters {
+        let _ = writeln!(
+            s,
+            "\\subsection*{{{} $\\leftrightarrow$ {}}}",
+            clean_label(&r.a),
+            clean_label(&r.b)
+        );
+        let _ = writeln!(
+            s,
+            "\\noindent {}\\par",
+            if r.exact {
+                "Exakt im gemeinsamen Zahlkörper geprüft."
+            } else {
+                "Numerisch (mindestens ein Objekt ohne exakte Koordinaten)."
+            }
+        );
+        if r.is_empty() {
+            match &r.near {
+                Some((d, a, b)) => {
+                    let _ = writeln!(s, "\\noindent Keine Berührung; kleinster Abstand $\\approx {d:.6}$ zwischen {} und {}.\\par", tex_text(a), tex_text(b));
+                }
+                None => {
+                    let _ = writeln!(s, "\\noindent Keine Berührung.\\par");
+                }
+            }
+        }
+        let mut it = String::new();
+        if !r.shared.is_empty() {
+            let pts: Vec<String> = r
+                .shared
+                .iter()
+                .take(12)
+                .map(|p| format!("${}$", p.tex))
+                .collect();
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Gemeinsame Knoten}} ({}): {}",
+                r.shared.len(),
+                pts.join(", ")
+            );
+        }
+        for g in analysis::crossing_groups(&r.crossings) {
+            let pts: Vec<String> = g.6.iter().take(6).map(|p| format!("${}$", p.tex)).collect();
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$): $\\lvert\\cos\\angle\\rvert = {}$, $\\angle \\approx {:.4}^\\circ$; bei {}{}",
+                g.2,
+                tex_text(&g.0),
+                tex_text(&g.1),
+                g.6.len(),
+                g.4,
+                g.5,
+                pts.join(", "),
+                if g.6.len() > 6 { ", \\ldots" } else { "" }
+            );
+        }
+        for p in &r.pierces {
+            let each = p
+                .each_tex
+                .as_ref()
+                .map(|e| format!(", je ${e}$"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{{}}} von {} in {}: {} ({}$\\times${}), Innenlänge gesamt ${}$",
+                tex_text(&p.label),
+                clean_label(&p.owner),
+                clean_label(&p.body),
+                tex_text(p.kind),
+                p.count,
+                each,
+                p.total_tex
+            );
+        }
+        for (a, b, l) in &r.overlaps {
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Überlappung}} {} / {}: gemeinsame Länge $\\approx {l:.6}$",
+                tex_text(a),
+                tex_text(b)
+            );
+        }
+        if let (Some((d, a, b)), false) = (&r.near, r.is_empty()) {
+            let _ = writeln!(
+                it,
+                "\\item Kleinster Abstand nicht berührender Streben $\\approx {d:.6}$ ({} / {})",
+                tex_text(a),
+                tex_text(b)
+            );
+        }
+        if r.near_misses > 0 {
+            let _ = writeln!(
+                it,
+                "\\item {} numerische Beinahe-Treffer, exakt widerlegt",
+                r.near_misses
+            );
+        }
+        for n in &r.notes {
+            let _ = writeln!(it, "\\item \\emph{{{}}}", tex_text(n));
+        }
+        if !it.is_empty() {
+            let _ = writeln!(s, "\\begin{{itemize}}\n{it}\\end{{itemize}}");
+        }
+    }
+    s
+}
+
+pub fn latex_document(
+    objs: &[(&Obj, &Built)],
+    scene: &Scene,
+    secs: &[SectionRes],
+    profs: &[Profile],
+    inters: &[InterRes],
+) -> String {
     let mut s = String::from(
-        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb}\n\\usepackage[a4paper,margin=2cm]{geometry}\n\\begin{document}\n\\section*{Strebwerk: Formeln}\n",
+        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb}\n\\usepackage[a4paper,margin=2cm]{geometry}\n",
     );
+    if !profs.is_empty() {
+        s.push_str("\\usepackage{pgfplots}\n\\pgfplotsset{compat=1.18}\n");
+    }
+    s.push_str("\\begin{document}\n\\section*{Strebwerk: Formeln}\n");
     for (o, b) in objs {
         s.push_str(&latex_object(o, b));
         s.push('\n');
     }
+    s.push_str(&latex_sections(scene, secs, profs));
+    s.push_str(&latex_interactions(inters));
     s.push_str("\\end{document}\n");
     s
 }

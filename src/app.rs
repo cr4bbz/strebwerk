@@ -1,5 +1,6 @@
 //! Oberfläche.
 
+use crate::analysis::{self, InterRes, Profile, SectionRes};
 use crate::export;
 use crate::expr;
 use crate::mesh::{LatticeKind, Tpms};
@@ -14,10 +15,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 
 #[derive(Serialize, Deserialize)]
-struct SaveFile {
-    format: String,
-    scene: Scene,
-    camera: Camera,
+pub struct SaveFile {
+    pub format: String,
+    pub scene: Scene,
+    pub camera: Camera,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -35,9 +36,12 @@ pub struct App {
     selected: Option<u64>,
     grid: bool,
     axes: bool,
-    section: bool,
-    section_axis: usize,
-    section_offset: f64,
+    inter_on: bool,
+    analysis_key: u64,
+    sections_res: Vec<SectionRes>,
+    profiles: Vec<Profile>,
+    inters: Vec<InterRes>,
+    analysis_ms: f64,
     tool: Tool,
     strut_first: Option<usize>,
     quick: String,
@@ -97,9 +101,12 @@ impl App {
             selected,
             grid: true,
             axes: true,
-            section: false,
-            section_axis: 2,
-            section_offset: 0.0,
+            inter_on: true,
+            analysis_key: 0,
+            sections_res: vec![],
+            profiles: vec![],
+            inters: vec![],
+            analysis_ms: 0.0,
             tool: Tool::Orbit,
             strut_first: None,
             quick: String::new(),
@@ -276,7 +283,47 @@ impl App {
             .filter(|o| o.visible)
             .filter_map(|o| self.built.get(&o.id).map(|b| (o, &b.1)))
             .collect();
-        export::latex_document(&pairs)
+        export::latex_document(
+            &pairs,
+            &self.scene,
+            &self.sections_res,
+            &self.profiles,
+            &self.inters,
+        )
+    }
+
+    /// Schnittebenen und Interaktionen neu auswerten, wenn sich etwas geändert hat.
+    fn reanalyze(&mut self) {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for o in self.scene.objects.iter().filter(|o| o.visible) {
+            o.id.hash(&mut h);
+            self.built.get(&o.id).map(|b| b.0).hash(&mut h);
+        }
+        serde_json::to_string(&self.scene.sections)
+            .unwrap_or_default()
+            .hash(&mut h);
+        for p in &self.scene.params {
+            p.value.to_bits().hash(&mut h);
+        }
+        self.inter_on.hash(&mut h);
+        let key = h.finish();
+        if key == self.analysis_key {
+            return;
+        }
+        self.analysis_key = key;
+        let t0 = std::time::Instant::now();
+        let vis: Vec<(&Obj, &Built)> = self
+            .scene
+            .objects
+            .iter()
+            .filter(|o| o.visible)
+            .filter_map(|o| self.built.get(&o.id).map(|b| (o, &b.1)))
+            .collect();
+        let (secs, profs, inters) = analysis::analyze_all(&self.scene, &vis, self.inter_on);
+        self.sections_res = secs;
+        self.profiles = profs;
+        self.inters = inters;
+        self.analysis_ms = t0.elapsed().as_secs_f64() * 1000.0;
     }
 
     // ------------------------------------------------------------------ UI
@@ -564,28 +611,120 @@ impl App {
 
             ui.add_space(8.0);
             ui.separator();
-            ui.heading("Schnittebene");
-            ui.checkbox(&mut self.section, "Ebene einblenden (Cavalieri)");
-            if self.section {
+            ui.heading("Schnittebenen");
+            ui.label(RichText::new("Ebene n·x = d. Normale und Lage sind Ausdrücke – mit Parametern wird die Schnittfläche bei Polyedern symbolisch.").small().weak());
+            let (c, r) = self.scene_extent();
+            let env = {
+                let (g, _) = self.scene.custom_gendefs();
+                self.scene.env(&g)
+            };
+            let mut rm = None;
+            let nsec = self.scene.sections.len();
+            for pi in 0..nsec {
+                let col = plane_color(pi);
+                let sec = &mut self.scene.sections[pi];
                 ui.horizontal(|ui| {
-                    ui.label("Normale");
-                    for (i, n) in ["x", "y", "z"].iter().enumerate() {
-                        ui.selectable_value(&mut self.section_axis, i, *n);
-                    }
-                });
-                let (c, r) = self.scene_extent();
-                let lo = c[self.section_axis] - r;
-                let hi = c[self.section_axis] + r;
-                ui.add(egui::Slider::new(&mut self.section_offset, lo..=hi).text("Lage"));
-                let n = [DVec3::X, DVec3::Y, DVec3::Z][self.section_axis];
-                for o in self.scene.objects.iter().filter(|o| o.visible) {
-                    if let Some((_, b)) = self.built.get(&o.id) {
-                        if let Some(m) = &b.section_mesh {
-                            let (_, a) = crate::mesh::slice(m, n, self.section_offset);
-                            ui.label(format!("{}: Schnittfläche ≈ {:.6}", o.name, a.abs()));
+                    ui.checkbox(&mut sec.visible, "");
+                    let (rr, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), Sense::hover());
+                    ui.painter().rect_filled(rr, 2.0, col);
+                    ui.add(egui::TextEdit::singleline(&mut sec.name).desired_width(70.0));
+                    for (k, n) in ["x", "y", "z"].iter().enumerate() {
+                        if ui.small_button(*n).on_hover_text(format!("Normale = {n}-Achse")).clicked() {
+                            sec.normal = ["0".into(), "0".into(), "0".into()];
+                            sec.normal[k] = "1".into();
                         }
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("✕").clicked() {
+                            rm = Some(pi);
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.label("n =");
+                    for k in 0..3 {
+                        ui.add(egui::TextEdit::singleline(&mut sec.normal[k]).desired_width(38.0).font(egui::TextStyle::Monospace));
+                    }
+                    ui.label("d =");
+                    ui.add(egui::TextEdit::singleline(&mut sec.offset).desired_width(60.0).font(egui::TextStyle::Monospace));
+                });
+                // Schieberegler, solange d eine Zahl ist
+                let nraw: Option<DVec3> = (0..3).map(|k| expr::num(&sec.normal[k], &env).ok()).collect::<Option<Vec<f64>>>().map(|v| DVec3::new(v[0], v[1], v[2]));
+                if let (Ok(mut d), Some(n)) = (sec.offset.trim().parse::<f64>(), nraw) {
+                    if n.length() > 1e-12 {
+                        let mid = n.dot(c);
+                        let span = r * n.length();
+                        ui.horizontal(|ui| {
+                            ui.add_space(18.0);
+                            if ui.add(egui::Slider::new(&mut d, (mid - span)..=(mid + span)).text("d")).changed() {
+                                let t = format!("{d:.3}");
+                                let t = t.trim_end_matches('0').trim_end_matches('.').to_string();
+                                sec.offset = if t == "-0" || t.is_empty() { "0".into() } else { t };
+                            }
+                        });
+                    }
+                } else {
+                    ui.label(RichText::new("   d ist ein Ausdruck – über die Parameter steuern").small().weak());
                 }
+                ui.horizontal(|ui| {
+                    ui.add_space(18.0);
+                    ui.checkbox(&mut sec.profile, "Cavalieri-Profil A(h)");
+                });
+                for res in self.sections_res.iter().filter(|x| x.plane == pi) {
+                    let shape = if res.exact { format!("{}-Eck, exakt", res.ngon) } else if res.loops > 1 { format!("{} Kurven", res.loops) } else { "numerisch".into() };
+                    ui.label(RichText::new(format!("   {} · {shape}", res.obj)).small().color(Color32::from_gray(160)));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(18.0);
+                        ui.add(egui::Label::new(RichText::new(format!("A = {}", res.area_uni)).size(14.0)).selectable(true));
+                        ui.add(egui::Label::new(RichText::new(format!("U = {}", res.perim_uni)).size(14.0)).selectable(true));
+                    });
+                    if res.exact {
+                        ui.label(RichText::new(format!("   ≈ {:.8}", res.area)).small().monospace().color(Color32::from_gray(130)));
+                    }
+                    if !res.note.is_empty() {
+                        ui.label(RichText::new(format!("   {}", res.note)).small().color(Color32::from_rgb(240, 200, 110)));
+                    }
+                }
+                for pr in self.profiles.iter().filter(|x| x.plane == pi) {
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        sparkline(ui, &pr.samples, col);
+                        ui.label(RichText::new(format!("{}\n∫A dh ≈ {:.5}\nV ≈ {:.5}", pr.obj, pr.integral, pr.volume)).small());
+                    });
+                }
+                ui.add_space(4.0);
+            }
+            if let Some(i) = rm {
+                self.scene.sections.remove(i);
+            }
+            if ui.button("+ Schnittebene").clicked() {
+                let n = self.scene.sections.len() + 1;
+                let mut sec = scene::Section::new(&format!("E{n}"), 2, "0");
+                let t = format!("{:.3}", c.z);
+                sec.offset = t.trim_end_matches('0').trim_end_matches('.').to_string();
+                if sec.offset.is_empty() || sec.offset == "-0" {
+                    sec.offset = "0".into();
+                }
+                self.scene.sections.push(sec);
+            }
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.heading("Interaktionen");
+            ui.checkbox(&mut self.inter_on, "Verstrebungen der Objekte untereinander auswerten");
+            if self.inter_on {
+                ui.label(RichText::new("◉ gemeinsamer Knoten  ● Kreuzung/Stoß  • Durchstoßpunkt  ▬ Abschnitt im anderen Körper").small().weak());
+                if self.inters.is_empty() {
+                    ui.label(RichText::new("Mindestens zwei sichtbare Objekte mit Streben nötig.").small().weak());
+                }
+                for r in &self.inters {
+                    let title = format!("{} ↔ {}{}", r.a, r.b, if r.exact { "  (exakt)" } else { "" });
+                    egui::CollapsingHeader::new(title).id_salt(format!("ia{}{}", r.a, r.b)).default_open(!r.is_empty()).show(ui, |ui| {
+                        inter_ui(ui, r);
+                    });
+                }
+                ui.label(RichText::new(format!("Auswertung {:.1} ms", self.analysis_ms)).small().weak());
             }
         });
     }
@@ -772,19 +911,41 @@ impl App {
             .filter_map(|o| self.built.get(&o.id).map(|b| (o.id, &b.1)))
             .collect();
         let (_, r) = self.scene_extent();
-        let section = if self.section {
-            Some((
-                [DVec3::X, DVec3::Y, DVec3::Z][self.section_axis],
-                self.section_offset,
-            ))
+        let sections: Vec<(DVec3, f64, Color32)> = self
+            .scene
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.visible)
+            .filter_map(|(i, e)| {
+                analysis::plane_num(e, &self.scene)
+                    .ok()
+                    .map(|(n, d)| (n, d, plane_color(i)))
+            })
+            .collect();
+        let (center, _) = self.scene_extent();
+        let (marks, highlights) = if self.inter_on {
+            (
+                self.inters
+                    .iter()
+                    .flat_map(|x| x.marks.iter().cloned())
+                    .collect(),
+                self.inters
+                    .iter()
+                    .flat_map(|x| x.inside.iter().cloned())
+                    .collect(),
+            )
         } else {
-            None
+            (vec![], vec![])
         };
         let opts = ViewOpts {
             grid: self.grid,
             axes: self.axes,
-            section,
+            sections,
             scene_radius: r,
+            scene_center: center,
+            marks,
+            highlights,
         };
         let mut picks: Vec<Pick> = vec![];
         let items = render::collect(&self.cam, rect, &objs, &opts, &mut picks);
@@ -920,6 +1081,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.rebuild();
+        self.reanalyze();
         if self.fit_pending {
             self.fit();
             self.fit_pending = false;
@@ -959,6 +1121,121 @@ impl eframe::App for App {
     }
 }
 
+fn plane_color(i: usize) -> Color32 {
+    [
+        Color32::from_rgb(255, 235, 80),
+        Color32::from_rgb(255, 150, 70),
+        Color32::from_rgb(160, 240, 110),
+        Color32::from_rgb(120, 200, 255),
+        Color32::from_rgb(240, 130, 240),
+    ][i % 5]
+}
+
+fn sparkline(ui: &mut egui::Ui, pts: &[(f64, f64)], col: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 42.0), Sense::hover());
+    let p = ui.painter();
+    p.rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0_f32, Color32::from_gray(60)),
+        egui::StrokeKind::Inside,
+    );
+    if pts.len() < 2 {
+        return;
+    }
+    let (h0, h1) = (pts[0].0, pts[pts.len() - 1].0);
+    let amax = pts.iter().map(|x| x.1).fold(1e-12, f64::max);
+    let line: Vec<egui::Pos2> = pts
+        .iter()
+        .map(|(h, a)| {
+            egui::pos2(
+                rect.left() + 3.0 + (rect.width() - 6.0) * ((h - h0) / (h1 - h0).max(1e-12)) as f32,
+                rect.bottom() - 3.0 - (rect.height() - 6.0) * (a / amax) as f32,
+            )
+        })
+        .collect();
+    p.add(egui::Shape::line(line, egui::Stroke::new(1.5_f32, col)));
+}
+
+fn inter_ui(ui: &mut egui::Ui, r: &InterRes) {
+    let row = |ui: &mut egui::Ui, head: &str, body: String| {
+        ui.label(RichText::new(head).small().color(Color32::from_gray(150)));
+        ui.add(egui::Label::new(RichText::new(body).size(13.5)).selectable(true));
+    };
+    if r.is_empty() {
+        let t = match &r.near {
+            Some((d, a, b)) => format!("keine Berührung; kleinster Abstand ≈ {d:.6} ({a} / {b})"),
+            None => "keine Berührung".into(),
+        };
+        ui.label(RichText::new(t).small());
+    }
+    if !r.shared.is_empty() {
+        let pts: Vec<&str> = r.shared.iter().take(6).map(|p| p.uni.as_str()).collect();
+        row(
+            ui,
+            &format!("Gemeinsame Knoten ({})", r.shared.len()),
+            pts.join(", "),
+        );
+    }
+    for g in analysis::crossing_groups(&r.crossings) {
+        let pts: Vec<&str> = g.6.iter().take(3).map(|p| p.uni.as_str()).collect();
+        row(
+            ui,
+            &format!("{}: {} × {} ({}×)", g.2, g.0, g.1, g.6.len()),
+            format!(
+                "|cos∠| = {}  (∠ ≈ {:.4}°)\nbei {}{}",
+                g.3,
+                g.5,
+                pts.join(", "),
+                if g.6.len() > 3 { ", …" } else { "" }
+            ),
+        );
+    }
+    for p in &r.pierces {
+        let each = p
+            .each_uni
+            .as_ref()
+            .map(|e| format!(", je {e}"))
+            .unwrap_or_default();
+        row(
+            ui,
+            &format!("{} von {} in {} – {}", p.label, p.owner, p.body, p.kind),
+            format!("{}×{each}, gesamt {}", p.count, p.total_uni),
+        );
+    }
+    for (a, b, l) in &r.overlaps {
+        row(
+            ui,
+            &format!("Überlappung {a} / {b}"),
+            format!("gemeinsame Länge ≈ {l:.6}"),
+        );
+    }
+    if let (Some((d, a, b)), false) = (&r.near, r.is_empty()) {
+        ui.label(
+            RichText::new(format!("kleinster Abstand sonst ≈ {d:.6} ({a} / {b})"))
+                .small()
+                .weak(),
+        );
+    }
+    if r.near_misses > 0 {
+        ui.label(
+            RichText::new(format!(
+                "{} numerische Beinahe-Treffer exakt widerlegt",
+                r.near_misses
+            ))
+            .small()
+            .color(Color32::from_rgb(240, 200, 110)),
+        );
+    }
+    for n in &r.notes {
+        ui.label(
+            RichText::new(n)
+                .small()
+                .color(Color32::from_rgb(240, 200, 110)),
+        );
+    }
+}
+
 const HELP: &str = "Steuerung
   Linke Maustaste ziehen: drehen   ·   rechte/mittlere (oder Shift+links): verschieben
   Mausrad: zoomen   ·   Doppelklick: Szene einpassen
@@ -989,8 +1266,21 @@ Freie Konstruktion
   Punkte im Inspektor oder per Werkzeug „Punkt setzen“ anlegen, Streben per Klick ziehen;
   „konvexe Hülle“ macht daraus einen Körper. Ohne Hülle gibt es eine Maxwell-Zählung.
 
+Schnittebenen
+  Beliebig viele Ebenen n·x = d; n und d sind Ausdrücke. Bei Polyedern wird das
+  Schnittpolygon exakt berechnet (Ecken, Umfang, Fläche) – mit einem Parameter in d
+  (z. B. d = s) bleibt A(s) symbolisch. Cavalieri-Profil: A(h) über die ganze
+  Ausdehnung, ∫A dh wird mit dem Volumen verglichen.
+
+Interaktionen
+  Für jedes Paar sichtbarer Objekte: gemeinsame Knoten, Kreuzungen und Stöße von Streben
+  (exakter Schnittpunkt und Winkel), Durchstoßungen mit Innenlänge im anderen Körper,
+  Überlappungen und kleinster Abstand. Bei exakten Objekten zählt ein Treffer nur, wenn er
+  exakt nachgewiesen ist; numerische Beinahe-Treffer werden als widerlegt gemeldet.
+
 Export
-  Datei → LaTeX (Formeln), TikZ (aktuelle Ansicht), STL (Gerüst zum 3D-Druck)";
+  Datei → LaTeX (Formeln, Schnittebenen, Profile, Interaktionen), TikZ (aktuelle Ansicht),
+  STL (Gerüst zum 3D-Druck). Ohne Fenster: strebwerk --tex szene.strebwerk [ausgabe.tex]";
 
 // ---------------------------------------------------------------------------
 // Inspektor-Teile

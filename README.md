@@ -10,7 +10,8 @@ Native Desktop-App in Rust (egui, gerendert über wgpu: Vulkan / Metal / DX12 / 
 # einmalig: Rust installieren (https://rustup.rs)
 cargo run --release                                  # leere Startszene
 cargo run --release -- examples/demo.strebwerk       # Szene direkt öffnen
-cargo test                                           # 19 Tests (Algebra, Geometrie, Topologie, Export)
+cargo run --release -- --tex examples/interaktion.strebwerk   # LaTeX-Export ohne Fenster
+cargo test                                           # Algebra, Geometrie, Topologie, Schnitte, Interaktionen
 ```
 
 Unter Linux werden die üblichen X11/Wayland-Bibliotheken gebraucht (auf Desktop-Systemen vorhanden).
@@ -52,7 +53,21 @@ Die Datei-Dialoge laufen über das XDG-Portal.
   Fenchel / Fáry–Milnor.
 - Schnittebene mit Schnittfläche (Cavalieri).
 
-**Export**: Formeln als LaTeX (align*), aktuelle Ansicht als TikZ (standalone), Gerüst als STL
+**Schnittebenen** (beliebig viele, `n·x = d`, Normale und Lage als Ausdrücke)
+- Polyeder: exaktes Schnittpolygon – Ecken, Umfang, Fläche in K[Parameter]. Mit `d = s` und einem
+  Parameter `s` entsteht z. B. für das Oktaeder |x|+|y|+|z| ≤ 2 direkt A(s) = 2s² − 8s + 8.
+- Netze (Flächen, implizite Körper): Fläche, Umfang, Anzahl der Schnittkurven.
+- Cavalieri-Profil h ↦ A(h) über die ganze Ausdehnung; ∫A dh wird mit dem Volumen verglichen.
+
+**Interaktionen der Verstrebungen** (jedes Paar sichtbarer Objekte)
+- gemeinsame Knoten, Kreuzungen und Stöße von Streben mit exaktem Schnittpunkt und Winkel (|cos ∠| in K),
+- Durchstoßungen: welche Streben in den anderen Körper eindringen, ganz innen liegen oder auf
+  seiner Oberfläche verlaufen – mit exakter Innenlänge,
+- kollineare Überlappungen und kleinster Abstand nicht berührender Streben,
+- Treffer gelten bei exakten Objekten nur, wenn sie im gemeinsamen Zahlkörper nachgewiesen sind.
+- Darstellung: Knoten weiß, Kreuzungen magenta, Durchstoßpunkte und Innenabschnitte cyan.
+
+**Export**: Formeln, Schnittebenen (mit pgfplots-Profil) und Interaktionen als LaTeX, aktuelle Ansicht als TikZ (standalone), Gerüst als STL
 zum 3D-Drucken (Streben als Stäbe, Knoten als Oktaeder, Maßstab einstellbar).
 Szenen werden als lesbares JSON gespeichert (`.strebwerk`).
 
@@ -62,6 +77,7 @@ Szenen werden als lesbares JSON gespeichert (`.strebwerk`).
 |---|---|
 | `src/algebra.rs` | Zahlkörpertürme, Polynome in Parametern, Inverse (reguläre Darstellung), Wurzelerkennung, Ausgabe Unicode/LaTeX, Kreisteilungs- und Dickson-Polynome |
 | `src/expr.rs` | Parser (implizite Multiplikation, Unicode-Eingabe), numerischer Compiler, exakte Auswertung |
+| `src/analysis.rs` | Schnittebenen (exaktes Schnittpolygon, Cavalieri-Profil), Interaktionen zwischen Objekten |
 | `src/poly.rs` | konvexe Hülle, exakte Polyeder-Analyse, Symmetriegruppen |
 | `src/mesh.rs` | Marching Tetrahedra, Parameterflächen mit Naht-Erkennung, Topologie, Schnitte, Gitter/TPMS |
 | `src/scene.rs` | Objektdefinitionen, Bau der Geometrie, Vorlagen |
