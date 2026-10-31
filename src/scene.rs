@@ -2135,10 +2135,11 @@ fn build_curve(
     });
     if closed {
         let ratio = tk / std::f64::consts::PI;
+        // Fáry–Milnor: verknotet ⇒ ∫κ ds > 4π. Nur die Kontraposition liefert eine Aussage.
         let note = if tk < 4.0 * std::f64::consts::PI - 1e-3 {
-            "< 4π ⇒ nach Fáry–Milnor unverknotet"
+            "< 4π ⇒ unverknotet (Kontraposition von Fáry–Milnor; Wert numerisch)"
         } else {
-            "≥ 4π: Fáry–Milnor lässt Verknotung zu (notwendig, nicht hinreichend)"
+            "> 4π: mit Verknotung verträglich, entscheidet aber nichts (Fáry–Milnor: verknotet ⇒ ∫κ ds > 4π, nicht umgekehrt)"
         };
         b.formulas.push(FLine {
             label: "Geschlossene Kurve".into(),

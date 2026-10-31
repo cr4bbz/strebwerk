@@ -342,12 +342,12 @@ fn latex_interactions(inters: &[InterRes]) -> String {
             let pts: Vec<String> = g.6.iter().take(6).map(|p| format!("${}$", p.tex)).collect();
             let _ = writeln!(
                 it,
-                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$): $\\lvert\\cos\\angle\\rvert = {}$, $\\angle \\approx {:.4}^\\circ$; bei {}{}",
+                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$): $\\lvert\\cos\\angle\\rvert {}$, $\\angle \\approx {:.4}^\\circ$; bei {}{}",
                 g.2,
                 tex_text(&g.0),
                 tex_text(&g.1),
                 g.6.len(),
-                g.4,
+                if g.4.starts_with("\\approx") { g.4.clone() } else { format!("= {}", g.4) },
                 g.5,
                 pts.join(", "),
                 if g.6.len() > 6 { ", \\ldots" } else { "" }

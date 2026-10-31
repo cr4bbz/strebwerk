@@ -28,7 +28,9 @@ fn pt_exact(r: &Ring, v: &V3) -> Pt {
 }
 
 fn pt_num(p: DVec3) -> Pt {
-    let s = format!("({:.6}, {:.6}, {:.6})", p.x, p.y, p.z);
+    // keine „−0.000000“: Werte unterhalb der Anzeigegenauigkeit als 0
+    let z = |x: f64| if x.abs() < 5e-7 { 0.0 } else { x };
+    let s = format!("({:.6}, {:.6}, {:.6})", z(p.x), z(p.y), z(p.z));
     Pt {
         p,
         uni: format!("≈ {s}"),
@@ -477,11 +479,29 @@ struct Seg {
 const SEG_CAP: usize = 2500;
 
 fn segs_of(b: &Built, notes: &mut Vec<String>, name: &str) -> Vec<Seg> {
+    // Doppelte Streben (gleiche Endpunkte, auch umgekehrt) nur einmal zählen – z. B. Sehnen mit
+    // Versatz ½ einer geschlossenen Kurve: t → t+½ und t+½ → t+1 sind dieselbe Strecke.
+    let q = 1e-9 * b.radius.max(1e-9);
+    let key = |p: DVec3| {
+        (
+            (p.x / q).round() as i64,
+            (p.y / q).round() as i64,
+            (p.z / q).round() as i64,
+        )
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut dups = 0usize;
     let mut v: Vec<Seg> = b
         .lines
         .iter()
         .filter_map(|l| {
-            l.inter.as_ref().map(|lab| Seg {
+            let lab = l.inter.as_ref()?;
+            let (ka, kb) = (key(l.a), key(l.b));
+            if !seen.insert((ka.min(kb), ka.max(kb))) {
+                dups += 1;
+                return None;
+            }
+            Some(Seg {
                 a: l.a,
                 b: l.b,
                 label: lab.clone(),
@@ -489,6 +509,9 @@ fn segs_of(b: &Built, notes: &mut Vec<String>, name: &str) -> Vec<Seg> {
             })
         })
         .collect();
+    if dups > 0 {
+        notes.push(format!("{name}: {dups} doppelte Strebe(n) zusammengefasst"));
+    }
     if v.len() > SEG_CAP {
         notes.push(format!(
             "{name}: nur die ersten {SEG_CAP} von {} Streben ausgewertet",
@@ -1284,5 +1307,54 @@ mod tests {
         assert!(tex.contains("\\textless{}") && !tex.contains("{F < 0}"));
         assert!(tex.contains("Länge der Schnittkurve"));
         assert!(tex.contains("1 Kreuzhaube, 1 Randkurve"));
+    }
+
+    /// Julians zweite Szene: Sehnen von (2,5)-Torusknoten und Möbiusband
+    #[test]
+    fn knot_and_moebius_chords() {
+        let mut sc = default_scene();
+        sc.objects.clear();
+        for name in ["(2,5)-Torusknoten", "Möbiusband"] {
+            let t = templates().into_iter().find(|t| t.name == name).unwrap();
+            sc.add(name, (t.make)());
+        }
+        for o in &mut sc.objects {
+            o.layers.chords = true;
+        }
+        let mut cache = Cache::new();
+        let built: Vec<(Obj, Built)> = sc
+            .objects
+            .iter()
+            .map(|o| (o.clone(), build(o, &sc, &mut cache)))
+            .collect();
+        let vis: Vec<(&Obj, &Built)> = built.iter().map(|(o, b)| (o, b)).collect();
+        let (_, _, inters) = analyze_all(&sc, &vis, true);
+        let r = &inters[0];
+        // Die Knotensehne r(0) → r(π) liegt auf der x-Achse zwischen 1 und 3; der Startpunkt der
+        // Möbius-Sehne bei u = 0 liegt darauf: genau ein Stoß, nicht doppelt gezählt.
+        let st: Vec<_> = r
+            .crossings
+            .iter()
+            .filter(|c| c.kind == "Stoß" && c.la == "Sehne" && c.lb == "Sehne")
+            .collect();
+        assert_eq!(
+            st.len(),
+            1,
+            "{:?}",
+            r.crossings
+                .iter()
+                .map(|c| (&c.la, &c.lb, c.kind, &c.p.uni))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            st[0].p.p.y.abs() < 1e-9
+                && st[0].p.p.z.abs() < 1e-9
+                && st[0].p.p.x > 1.0
+                && st[0].p.p.x < 3.0
+        );
+        assert!(!st[0].p.uni.contains("-0.000000"));
+        assert!(r.notes.iter().any(|n| n.contains("doppelte")));
+        let tex = crate::export::latex_document(&vis, &sc, &[], &[], &inters);
+        assert!(!tex.contains("= \\approx") && !tex.contains("Fáry–Milnor lässt"));
     }
 }

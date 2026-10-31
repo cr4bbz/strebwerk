@@ -1188,8 +1188,12 @@ fn inter_ui(ui: &mut egui::Ui, r: &InterRes) {
             ui,
             &format!("{}: {} × {} ({}×)", g.2, g.0, g.1, g.6.len()),
             format!(
-                "|cos∠| = {}  (∠ ≈ {:.4}°)\nbei {}{}",
-                g.3,
+                "|cos∠| {}  (∠ ≈ {:.4}°)\nbei {}{}",
+                if g.3.starts_with('≈') {
+                    g.3.clone()
+                } else {
+                    format!("= {}", g.3)
+                },
                 g.5,
                 pts.join(", "),
                 if g.6.len() > 3 { ", …" } else { "" }
