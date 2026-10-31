@@ -623,7 +623,8 @@ fn cos_angle(
                 return ("0".into(), "0".into(), ang);
             }
             let rad = r.sqrt(&c2);
-            let (u, t) = (r.fmt_rad(&rad, false), r.fmt_rad(&rad, true));
+            // mit Potenzform, z. B. ⅓√(6ρ) = ⅓√6·ρ^(1/2)
+            let (u, t) = (poly::rad_str(r, &rad, false), poly::rad_str(r, &rad, true));
             // Sehr lange Ausdrücke in K(Parameter): exakt am aktuellen (rationalen) Parameterwert angeben
             if t.len() > 160 {
                 if let Some((c2v, du, dt)) = r.at_params(&c2) {

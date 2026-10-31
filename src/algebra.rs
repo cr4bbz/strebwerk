@@ -1585,6 +1585,13 @@ impl Ring {
         let nd = content.numer() * content.denom();
         let (sq, r) = square_split(&nd);
         outside = self.smul(&outside, &self.sym_c(Q::new(sq, content.denom().clone())));
+        // nach dem Herausziehen des Inhalts kann der Rest ein Quadrat sein: 3(s − 3)⁴ → √3·(s − 3)²
+        if let Some(q) = self.psqrt(&prim) {
+            outside = self.smul(&outside, &self.sym(q));
+            let ri = self.mul(&oddm, &self.c(Q::from_integer(r)));
+            let inside = if ri.is_one() { None } else { Some(ri) };
+            return Radical { outside, absm, inside };
+        }
         let mut inside = self.mul(&self.mul(&prim, &oddm), &self.c(Q::from_integer(r)));
         // Vorzeichen-Normierung: Inneres positiv auswerten
         if self.eval(&inside) < 0.0 && !inside.is_zero() {
