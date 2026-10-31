@@ -453,6 +453,14 @@ pub fn topology(m: &Mesh) -> Topology {
     topo
 }
 
+fn rand(b: i64) -> String {
+    match b {
+        0 => "ohne Rand".into(),
+        1 => "1 Randkurve".into(),
+        _ => format!("{b} Randkurven"),
+    }
+}
+
 pub fn classify(t: &Topology) -> String {
     if t.f == 0 {
         return "leer".into();
@@ -480,7 +488,7 @@ pub fn classify(t: &Topology) -> String {
             (0, 2) => " – Kreisring",
             _ => "",
         };
-        format!("orientierbar, Geschlecht g = {g}, {b} Randkurve(n){known}")
+        format!("orientierbar, Geschlecht g = {g}, {}{known}", rand(b))
     } else {
         let known = match (rest, b) {
             (1, 0) => " – projektive Ebene ℝP²",
@@ -488,7 +496,12 @@ pub fn classify(t: &Topology) -> String {
             (1, 1) => " – Möbiusband",
             _ => "",
         };
-        format!("nicht orientierbar, {rest} Kreuzhaube(n), {b} Randkurve(n){known}")
+        let kh = if rest == 1 {
+            "1 Kreuzhaube".to_string()
+        } else {
+            format!("{rest} Kreuzhauben")
+        };
+        format!("nicht orientierbar, {kh}, {}{known}", rand(b))
     };
     format!("χ = {}  ·  {name}", t.chi)
 }

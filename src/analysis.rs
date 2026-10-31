@@ -115,6 +115,8 @@ pub struct SectionRes {
     pub points: Vec<Pt>,
     pub loops: usize,
     pub note: String,
+    /// Schneidet die Ebene eine geschlossene Fläche? Nur dann ist A definiert.
+    pub closed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -178,20 +180,37 @@ pub fn section(scene: &Scene, pi: usize, obj: &Obj, b: &Built) -> Option<Section
     }
     let perim: f64 = segs.iter().map(|(a, c)| (*c - *a).length()).sum();
     let loops = mesh_loops(&segs, b.radius);
+    // Nur eine geschlossene Fläche begrenzt in der Ebene ein Gebiet; bei offenen Flächen
+    // (Möbiusband, Helikoid …) ist die orientierte Summe bedeutungslos.
+    let closed = is_closed(m);
+    let (area, area_uni, area_tex) = if closed {
+        (
+            area.abs(),
+            format!("≈ {:.6}", area.abs()),
+            format!("\\approx {:.6}", area.abs()),
+        )
+    } else {
+        (f64::NAN, "—".to_string(), String::new())
+    };
     let mut res = SectionRes {
         plane: pi,
         obj: obj.name.clone(),
         exact: false,
         ngon: 0,
-        area: area.abs(),
-        area_uni: format!("≈ {:.6}", area.abs()),
-        area_tex: format!("\\approx {:.6}", area.abs()),
+        closed,
+        area,
+        area_uni,
+        area_tex,
         perim,
         perim_uni: format!("≈ {perim:.6}"),
         perim_tex: format!("\\approx {perim:.6}"),
         points: vec![],
         loops,
-        note: String::new(),
+        note: if closed {
+            String::new()
+        } else {
+            "offene Fläche: die Schnittkurven schließen kein Gebiet ein, nur ihre Länge ist definiert".into()
+        },
     };
     if b.exact_ok && !b.hull_faces.is_empty() {
         match exact_section(scene, sec, obj, b) {
@@ -330,6 +349,7 @@ fn exact_section(
         plane: 0,
         obj: obj.name.clone(),
         exact: true,
+        closed: true,
         ngon: k,
         area: r.rad_eval(&area),
         area_uni: r.fmt_rad(&area, false),
@@ -1225,5 +1245,44 @@ mod tests {
         );
         assert!(tex.contains("2s^{2} - 8s + 8") && tex.contains("pgfplots"));
         assert!(!tex.contains("\\begin{itemize}\n\\end{itemize}"));
+    }
+
+    /// Julians Szene: offene Fläche + Kugel, Schnitt z = s
+    #[test]
+    fn open_surface_section_and_escaping() {
+        let mut sc = default_scene();
+        sc.objects.clear();
+        sc.params.push(Param {
+            name: "s".into(),
+            value: 0.4,
+            min: -1.0,
+            max: 1.0,
+            animate: false,
+            speed: 0.1,
+            dir: 1.0,
+        });
+        for name in ["Möbiusband", "Kugel x² + y² + z² = a²"] {
+            let t = templates().into_iter().find(|t| t.name == name).unwrap();
+            sc.add(name, (t.make)());
+        }
+        sc.sections.push(Section::new("E1", 2, "s"));
+        let mut cache = Cache::new();
+        let built: Vec<(Obj, Built)> = sc
+            .objects
+            .iter()
+            .map(|o| (o.clone(), build(o, &sc, &mut cache)))
+            .collect();
+        let vis: Vec<(&Obj, &Built)> = built.iter().map(|(o, b)| (o, b)).collect();
+        let (secs, profs, inters) = analyze_all(&sc, &vis, true);
+        let mob = secs.iter().find(|r| r.obj == "Möbiusband").unwrap();
+        assert!(!mob.closed && mob.area.is_nan());
+        let kug = secs.iter().find(|r| r.obj.starts_with("Kugel")).unwrap();
+        assert!(kug.closed && (kug.area - std::f64::consts::PI * (1.0 - 0.16)).abs() < 0.02);
+        assert_eq!(profs.len(), 1);
+        let tex = crate::export::latex_document(&vis, &sc, &secs, &profs, &inters);
+        assert!(!tex.contains("&= \\approx"), "= ≈ im Export");
+        assert!(tex.contains("\\textless{}") && !tex.contains("{F < 0}"));
+        assert!(tex.contains("Länge der Schnittkurve"));
+        assert!(tex.contains("1 Kreuzhaube, 1 Randkurve"));
     }
 }

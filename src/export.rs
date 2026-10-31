@@ -20,6 +20,8 @@ fn clean_label(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            '<' => out.push_str("\\textless{}"),
+            '>' => out.push_str("\\textgreater{}"),
             c if (c as u32) < 0x250 => out.push(c),
             _ => {}
         }
@@ -36,6 +38,8 @@ pub fn tex_text(s: &str) -> String {
         let piece = match c {
             '&' | '%' | '$' | '#' | '_' | '{' | '}' => format!("\\{c}"),
             '\\' => "\\textbackslash{}".into(),
+            '<' => "\\textless{}".into(),
+            '>' => "\\textgreater{}".into(),
             '^' => "\\^{}".into(),
             '~' => "\\~{}".into(),
             'χ' => m("\\chi"),
@@ -143,6 +147,10 @@ pub fn latex_object(o: &Obj, b: &Built) -> String {
         }
     };
     for l in &b.formulas {
+        // die Definition steht schon als abgesetzte Formel darüber
+        if l.label == "Definition" && !b.def_tex.is_empty() {
+            continue;
+        }
         if l.tex.is_empty() {
             flush(&mut s, &mut block);
             let _ = writeln!(
@@ -207,13 +215,29 @@ fn latex_sections(scene: &Scene, secs: &[SectionRes], profs: &[Profile]) -> Stri
             } else {
                 "numerisch".to_string()
             };
+            // „&= x“ bzw. „&\approx x“, nie „= ≈“
+            let rel = |t: &str| {
+                if t.starts_with("\\approx") {
+                    format!("&{t}")
+                } else {
+                    format!("&= {t}")
+                }
+            };
+            let body = if r.closed {
+                format!("  A {} \\\\\n  U {}", rel(&r.area_tex), rel(&r.perim_tex))
+            } else {
+                format!(
+                    "  L {} && \\text{{Länge der Schnittkurve{}}}",
+                    rel(&r.perim_tex),
+                    if r.loops > 1 { "n" } else { "" }
+                )
+            };
             let _ = writeln!(
                 s,
-                "\\paragraph{{{}}} ({})\n\\begin{{align*}}\n  A &= {} \\\\\n  U &= {}\n\\end{{align*}}",
+                "\\paragraph{{{}}} ({})\n\\begin{{align*}}\n{}\n\\end{{align*}}",
                 clean_label(&r.obj),
                 shape,
-                r.area_tex,
-                r.perim_tex
+                body
             );
             if r.exact && !r.points.is_empty() {
                 let pts: Vec<String> = r

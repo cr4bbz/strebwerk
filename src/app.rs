@@ -676,8 +676,13 @@ impl App {
                     ui.label(RichText::new(format!("   {} · {shape}", res.obj)).small().color(Color32::from_gray(160)));
                     ui.horizontal_wrapped(|ui| {
                         ui.add_space(18.0);
-                        ui.add(egui::Label::new(RichText::new(format!("A = {}", res.area_uni)).size(14.0)).selectable(true));
-                        ui.add(egui::Label::new(RichText::new(format!("U = {}", res.perim_uni)).size(14.0)).selectable(true));
+                        let rel = |t: &str| if t.starts_with('≈') { t.to_string() } else { format!("= {t}") };
+                        if res.closed {
+                            ui.add(egui::Label::new(RichText::new(format!("A {}", rel(&res.area_uni))).size(14.0)).selectable(true));
+                            ui.add(egui::Label::new(RichText::new(format!("U {}", rel(&res.perim_uni))).size(14.0)).selectable(true));
+                        } else {
+                            ui.add(egui::Label::new(RichText::new(format!("Kurvenlänge {}", rel(&res.perim_uni))).size(14.0)).selectable(true));
+                        }
                     });
                     if res.exact {
                         ui.label(RichText::new(format!("   ≈ {:.8}", res.area)).small().monospace().color(Color32::from_gray(130)));
