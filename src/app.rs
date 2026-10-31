@@ -69,6 +69,10 @@ struct Watch {
     pending: bool,
 }
 
+fn is_default_camera(c: &Camera) -> bool {
+    serde_json::to_string(c).ok() == serde_json::to_string(&Camera::default()).ok()
+}
+
 fn mtime_of(p: &std::path::Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
@@ -103,8 +107,9 @@ impl App {
             {
                 Ok(f) => {
                     scene = f.scene;
+                    // Szenen vom MCP-Server haben die Standardkamera → einpassen
+                    fit_pending = is_default_camera(&f.camera);
                     cam = f.camera;
-                    fit_pending = false;
                     status = format!("Geöffnet: {path}");
                     watch_path = Some(std::path::PathBuf::from(&path));
                 }
@@ -377,6 +382,7 @@ impl App {
         match res {
             Ok(f) => {
                 self.scene = f.scene;
+                self.fit_pending = is_default_camera(&f.camera);
                 self.cam = f.camera;
                 self.selected = self.scene.objects.first().map(|o| o.id);
                 self.built.clear();

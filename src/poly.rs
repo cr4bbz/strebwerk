@@ -336,6 +336,14 @@ fn rad_power(r: &Ring, rad: &Radical, tex: bool) -> Option<String> {
     if rad.absm.is_some() || !rad.outside.den.is_one() {
         return None;
     }
+    // c·gᵏ·√n (ein Term außen, rationale Zahl innen) ist schon seine eigene Potenzform
+    let inside_rational = rad
+        .inside
+        .as_ref()
+        .map_or(true, |i| i.as_constant().is_some());
+    if rad.outside.num.t.len() == 1 && inside_rational {
+        return None;
+    }
     let neg = r.seval(&rad.outside) < 0.0;
     let o2 = r.mul(&rad.outside.num, &rad.outside.num);
     let x = match &rad.inside {
