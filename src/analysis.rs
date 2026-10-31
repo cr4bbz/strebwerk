@@ -23,7 +23,8 @@ fn pt_exact(r: &Ring, v: &V3) -> Pt {
     Pt {
         p: poly::v3_eval(r, v),
         uni: format!("({})", u.join(", ")),
-        tex: format!("\\left({}\\right)", t.join(",\\ ")),
+        // ohne \left/\right, damit TeX zwischen den Koordinaten umbrechen darf
+        tex: format!("({})", t.join(",\\allowbreak\\ ")),
     }
 }
 
@@ -424,6 +425,20 @@ pub struct Crossing {
     pub cos_uni: String,
     pub cos_tex: String,
     pub angle: f64,
+    /// Indizes der beteiligten Streben (für Bündelpunkte)
+    pub ia: usize,
+    pub ib: usize,
+}
+
+/// Punkt, in dem sich mindestens drei Streben treffen (z. B. gemeinsamer Mittelpunkt).
+#[derive(Clone, Debug)]
+pub struct Bundle {
+    pub p: Pt,
+    /// (Bezeichnung, Anzahl verschiedener Streben) von Objekt A bzw. B
+    pub a: Vec<(String, usize)>,
+    pub b: Vec<(String, usize)>,
+    /// verschiedene Paarwinkel zwischen A- und B-Streben: (|cos| uni, |cos| tex, Winkel)
+    pub angles: Vec<(String, String, f64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -606,7 +621,19 @@ fn cos_angle(
                 return ("0".into(), "0".into(), ang);
             }
             let rad = r.sqrt(&c2);
-            return (r.fmt_rad(&rad, false), r.fmt_rad(&rad, true), ang);
+            let (u, t) = (r.fmt_rad(&rad, false), r.fmt_rad(&rad, true));
+            // Sehr lange Ausdrücke in K(Parameter): exakt am aktuellen (rationalen) Parameterwert angeben
+            if t.len() > 160 {
+                if let Some((c2v, du, dt)) = r.at_params(&c2) {
+                    let rv = r.sqrt(&c2v);
+                    return (
+                        format!("{}  (bei {du})", r.fmt_rad(&rv, false)),
+                        format!("{} \\quad (\\text{{bei }} {dt})", r.fmt_rad(&rv, true)),
+                        ang,
+                    );
+                }
+            }
+            return (u, t, ang);
         }
     }
     (format!("≈ {c:.6}"), format!("\\approx {c:.6}"), ang)
@@ -674,7 +701,7 @@ pub fn interact(scene: &Scene, oa: &Obj, ba: &Built, ob: &Obj, bb: &Built) -> In
     }
     let bbox = |s: &Seg| (s.a.min(s.b), s.a.max(s.b));
     let bxb: Vec<(DVec3, DVec3)> = sb.iter().map(bbox).collect();
-    for x in &sa {
+    for (xi, x) in sa.iter().enumerate() {
         let (lo, hi) = bbox(x);
         for (yi, y) in sb.iter().enumerate() {
             let (lo2, hi2) = bxb[yi];
@@ -765,6 +792,8 @@ pub fn interact(scene: &Scene, oa: &Obj, ba: &Built, ob: &Obj, bb: &Built) -> In
                         cos_uni: cu,
                         cos_tex: ct,
                         angle: ang,
+                        ia: xi,
+                        ib: yi,
                     });
                 }
                 None => {
@@ -779,6 +808,8 @@ pub fn interact(scene: &Scene, oa: &Obj, ba: &Built, ob: &Obj, bb: &Built) -> In
                         cos_uni: cu,
                         cos_tex: ct,
                         angle: ang,
+                        ia: xi,
+                        ib: yi,
                     });
                 }
             }
@@ -1096,6 +1127,61 @@ pub fn analyze_all(
 }
 
 /// Kurzfassung der Kreuzungen: gleiche (Strebenpaar, Art, Winkel) zusammengefasst.
+/// Kreuzungen, die in einem Punkt zusammenfallen und mindestens drei Streben betreffen,
+/// werden zu Bündelpunkten; der Rest bleibt als einzelne Kreuzungen.
+pub fn bundles(cs: &[Crossing]) -> (Vec<Bundle>, Vec<Crossing>) {
+    let mut groups: Vec<Vec<usize>> = vec![];
+    for (i, c) in cs.iter().enumerate() {
+        let tol = 1e-9 * c.p.p.length().max(1.0);
+        match groups
+            .iter_mut()
+            .find(|g| (cs[g[0]].p.p - c.p.p).length() < tol)
+        {
+            Some(g) => g.push(i),
+            None => groups.push(vec![i]),
+        }
+    }
+    let mut out = vec![];
+    let mut rest = vec![];
+    for g in groups {
+        let ia: BTreeSet<usize> = g.iter().map(|i| cs[*i].ia).collect();
+        let ib: BTreeSet<usize> = g.iter().map(|i| cs[*i].ib).collect();
+        if ia.len() + ib.len() < 3 {
+            rest.extend(g.iter().map(|i| cs[*i].clone()));
+            continue;
+        }
+        let count = |pick: &dyn Fn(&Crossing) -> (String, usize)| -> Vec<(String, usize)> {
+            let mut m: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+            for i in &g {
+                let (l, k) = pick(&cs[*i]);
+                m.entry(l).or_default().insert(k);
+            }
+            m.into_iter().map(|(l, s)| (l, s.len())).collect()
+        };
+        // gleiche Winkel nur einmal; exakte Darstellung vor numerischer
+        let mut angles: Vec<(String, String, f64)> = vec![];
+        let mut order: Vec<usize> = g.clone();
+        order.sort_by_key(|i| cs[*i].cos_uni.starts_with('≈'));
+        for i in order {
+            let c = &cs[i];
+            if !angles
+                .iter()
+                .any(|a| a.0 == c.cos_uni || (a.2 - c.angle).abs() < 1e-7)
+            {
+                angles.push((c.cos_uni.clone(), c.cos_tex.clone(), c.angle));
+            }
+        }
+        angles.sort_by(|x, y| x.2.partial_cmp(&y.2).unwrap());
+        out.push(Bundle {
+            p: cs[g[0]].p.clone(),
+            a: count(&|c| (c.la.clone(), c.ia)),
+            b: count(&|c| (c.lb.clone(), c.ib)),
+            angles,
+        });
+    }
+    (out, rest)
+}
+
 pub fn crossing_groups(
     cs: &[Crossing],
 ) -> Vec<(String, String, &'static str, String, String, f64, Vec<Pt>)> {
@@ -1105,7 +1191,13 @@ pub fn crossing_groups(
             .iter_mut()
             .find(|g| g.0 == c.la && g.1 == c.lb && g.2 == c.kind && g.3 == c.cos_uni)
         {
-            g.6.push(c.p.clone());
+            if !g
+                .6
+                .iter()
+                .any(|p| (p.p - c.p.p).length() < 1e-9 * p.p.length().max(1.0))
+            {
+                g.6.push(c.p.clone());
+            }
         } else {
             out.push((
                 c.la.clone(),
@@ -1356,5 +1448,26 @@ mod tests {
         assert!(r.notes.iter().any(|n| n.contains("doppelte")));
         let tex = crate::export::latex_document(&vis, &sc, &[], &[], &inters);
         assert!(!tex.contains("= \\approx") && !tex.contains("Fáry–Milnor lässt"));
+    }
+
+    /// Julians Szene „anti-rho3“: Bündelpunkt im Ursprung, Winkel exakt bei h = 1
+    #[test]
+    fn anti_rho3_bundle() {
+        let txt = std::fs::read_to_string("examples/anti-rho3.strebwerk").unwrap();
+        let f: crate::app::SaveFile = serde_json::from_str(&txt).unwrap();
+        let mut cache = Cache::new();
+        let built: Vec<(Obj, Built)> = f.scene.objects.iter().map(|o| (o.clone(), build(o, &f.scene, &mut cache))).collect();
+        let vis: Vec<(&Obj, &Built)> = built.iter().map(|(o, b)| (o, b)).collect();
+        let (secs, _, inters) = analyze_all(&f.scene, &vis, true);
+        let (bs, _) = bundles(&inters[0].crossings);
+        assert_eq!(bs.len(), 1);
+        let b = &bs[0];
+        assert!(b.p.p.length() < 1e-12);
+        // keine doppelten Winkel (Speichen liegen auf den Raumdiagonalen)
+        assert_eq!(b.angles.len(), 10, "{:?}", b.angles.iter().map(|a| a.2).collect::<Vec<_>>());
+        assert!(b.angles.iter().all(|a| a.1.len() < 400), "Ausdruck zu lang");
+        // Mittelschnitt des Antiprismas: Zehneck mit Umfang 5σ₁₀, unabhängig von h
+        let z0 = secs.iter().find(|r| r.plane == 0 && r.obj.starts_with("Antiprisma")).unwrap();
+        assert_eq!((z0.ngon, z0.perim_uni.as_str()), (10, "5σ₁₀"));
     }
 }

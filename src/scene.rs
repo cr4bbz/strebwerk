@@ -2833,4 +2833,22 @@ mod tests {
         let b = build_tpl("Kleeblattknoten");
         assert!(line(&b, "Geschlossene").uni.contains("Fáry"));
     }
+
+    /// Julians Szene „anti-rho3“: gemischter Quader 1 × ρ × ρ³ und fünfseitiges Antiprisma
+    #[test]
+    fn mixed_cuboid_and_antiprism() {
+        let b = build_tpl("Gemischter Quader 1 × ρ × ρ³ (binomisch)");
+        // Paper, Korollar 2: d² = 2(1 + ρ + ρ²) = 2ρ⁵
+        assert_eq!(
+            line(&b, "Raumdiagonale").uni,
+            "√(2 + 2ρ + 2ρ²) = √2·ρ^(5/2)"
+        );
+        assert_eq!(line(&b, "Volumen").uni, "ρ + ρ² = ρ⁴");
+        let b = build_tpl("Antiprisma (n = 5)");
+        let g = line(&b, "Symmetriegruppe");
+        assert!(g.uni.starts_with("D₅d, Ordnung 20"), "{}", g.uni);
+        // √(3 − φ) liegt im Körper: σ₁₀; √(2 + φ) = φσ₁₀
+        assert_eq!(line(&b, "Kante ℓ₂").uni, "σ₁₀");
+        assert_eq!(line(&b, "Flächendiagonale").uni, "φσ₁₀");
+    }
 }

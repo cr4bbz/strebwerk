@@ -1182,7 +1182,34 @@ fn inter_ui(ui: &mut egui::Ui, r: &InterRes) {
             pts.join(", "),
         );
     }
-    for g in analysis::crossing_groups(&r.crossings) {
+    let (bundles, rest) = analysis::bundles(&r.crossings);
+    for bu in &bundles {
+        let side = |v: &[(String, usize)]| {
+            v.iter()
+                .map(|(l, n)| format!("{n}× {l}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let angs: Vec<String> = bu
+            .angles
+            .iter()
+            .map(|(_, _, a)| format!("{a:.2}°"))
+            .collect();
+        row(
+            ui,
+            &format!("Bündelpunkt {}", bu.p.uni),
+            format!(
+                "{} von {} und {} von {}\n{} Paarwinkel: {}",
+                side(&bu.a),
+                r.a,
+                side(&bu.b),
+                r.b,
+                angs.len(),
+                angs.join(", ")
+            ),
+        );
+    }
+    for g in analysis::crossing_groups(&rest) {
         let pts: Vec<&str> = g.6.iter().take(3).map(|p| p.uni.as_str()).collect();
         row(
             ui,

@@ -279,6 +279,49 @@ fn subscript_n(n: usize) -> String {
         .collect()
 }
 
+/// Kanonische Form, ergänzt um die Potenzform, wenn der Wert eine reine Potenz eines
+/// Generators ist: √(2 + 2ρ + 2ρ²) = √2·ρ^(5/2), ρ + ρ² = ρ⁴.
+pub fn rad_str(r: &Ring, rad: &Radical, tex: bool) -> String {
+    let base = r.fmt_rad(rad, tex);
+    if rad.absm.is_some() || !rad.outside.den.is_one() || r.seval(&rad.outside) < 0.0 {
+        return base;
+    }
+    let o2 = r.mul(&rad.outside.num, &rad.outside.num);
+    let x = match &rad.inside {
+        Some(i) => r.mul(&o2, i),
+        None => o2,
+    };
+    match r.power_form(&x) {
+        Some((a, gi, m)) => {
+            let p = r.fmt_power(&a, gi, m, true, tex);
+            if p == base {
+                base
+            } else {
+                format!("{base} = {p}")
+            }
+        }
+        None => base,
+    }
+}
+
+pub fn sym_str(r: &Ring, s: &Sym, tex: bool) -> String {
+    let base = r.fmt_sym(s, tex);
+    if !s.den.is_one() {
+        return base;
+    }
+    match r.power_form(&s.num) {
+        Some((a, gi, m)) => {
+            let p = r.fmt_power(&a, gi, m, false, tex);
+            if p == base {
+                base
+            } else {
+                format!("{base} = {p}")
+            }
+        }
+        None => base,
+    }
+}
+
 /// Exakte Klassifikation von Punktpaaren nach (Art, Quadrat des Abstands).
 pub fn classify_pairs(
     r: &Ring,
@@ -313,8 +356,8 @@ pub fn classify_pairs(
                     classes.push(DistClass {
                         kind,
                         sub: 0,
-                        uni: r.fmt_rad(&rad, false),
-                        tex: r.fmt_rad(&rad, true),
+                        uni: rad_str(r, &rad, false),
+                        tex: rad_str(r, &rad, true),
                         d2,
                         rad,
                         value,
@@ -501,8 +544,8 @@ pub fn analyze_polyhedron(r: &Ring, ex: &[V3], num: &[DVec3], hull: &Hull) -> An
         };
         a.lines.push(FLine {
             label,
-            uni: r.fmt_rad(&rad, false),
-            tex: format!("{texl} &= {}", r.fmt_rad(&rad, true)),
+            uni: rad_str(r, &rad, false),
+            tex: format!("{texl} &= {}", rad_str(r, &rad, true)),
             num: Some(r.rad_eval(&rad)),
             val: Some(ValSrc::Rad(rad.clone())),
             ..Default::default()
@@ -537,8 +580,8 @@ pub fn analyze_polyhedron(r: &Ring, ex: &[V3], num: &[DVec3], hull: &Hull) -> An
     }
     a.lines.push(FLine {
         label: "Volumen V".into(),
-        uni: r.fmt_sym(&vol, false),
-        tex: format!("\\mathrm{{Vol}} &= {}", r.fmt_sym(&vol, true)),
+        uni: sym_str(r, &vol, false),
+        tex: format!("\\mathrm{{Vol}} &= {}", sym_str(r, &vol, true)),
         num: Some(r.seval(&vol)),
         val: Some(ValSrc::Sym(vol.clone())),
         ..Default::default()
@@ -565,8 +608,8 @@ pub fn analyze_polyhedron(r: &Ring, ex: &[V3], num: &[DVec3], hull: &Hull) -> An
             let rad = r.sqrt(&vals[0]);
             a.lines.push(FLine {
                 label: name.into(),
-                uni: r.fmt_rad(&rad, false),
-                tex: format!("{texn} &= {}", r.fmt_rad(&rad, true)),
+                uni: rad_str(r, &rad, false),
+                tex: format!("{texn} &= {}", rad_str(r, &rad, true)),
                 num: Some(r.rad_eval(&rad)),
                 val: Some(ValSrc::Rad(rad.clone())),
                 ..Default::default()
@@ -889,7 +932,7 @@ fn name_group(info: &mut SymInfo) {
             })
             .collect()
     };
-    let (base, suffix, note): (String, String, String) = if cnt(5) > 0 {
+    let (base, suffix, note): (String, String, String) = if cnt(5) >= 6 {
         (
             "I".into(),
             if g == 120 { "h".into() } else { String::new() },

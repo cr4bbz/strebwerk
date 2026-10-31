@@ -8,7 +8,23 @@ use glam::DVec3;
 use std::collections::HashMap;
 use std::fmt::Write;
 
+/// Mathematik, die bei Überbreite auf Zeilenbreite verkleinert wird (graphicx).
+fn fitmath(m: &str) -> String {
+    format!("\\resizebox{{\\ifdim\\width>\\linewidth\\linewidth\\else\\width\\fi}}{{!}}{{$\\displaystyle {m}$}}")
+}
+
+fn centered(m: &str) -> String {
+    format!("\\begin{{center}}{}\\end{{center}}", fitmath(m))
+}
+
+const LONG: usize = 160;
+
+/// Bezeichnungen (Objektnamen, Zeilenbeschriftungen) für LaTeX – Sonderzeichen bleiben erhalten.
 fn clean_label(s: &str) -> String {
+    tex_text(s)
+}
+
+fn clean_label_ascii(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         match c {
@@ -158,6 +174,15 @@ pub fn latex_object(o: &Obj, b: &Built) -> String {
                 "\\noindent\\textbf{{{}:}} {}\\par",
                 clean_label(&l.label),
                 tex_text(&l.uni)
+            );
+        } else if l.tex.len() > LONG {
+            flush(&mut s, &mut block);
+            let m = l.tex.replace("&=", "=").replace("&\\approx", "\\approx");
+            let _ = writeln!(
+                s,
+                "\\noindent\\textbf{{{}:}}\\par\n{}",
+                clean_label(&l.label),
+                centered(&m)
             );
         } else {
             block.push(format!(
@@ -338,17 +363,62 @@ fn latex_interactions(inters: &[InterRes]) -> String {
                 pts.join(", ")
             );
         }
-        for g in analysis::crossing_groups(&r.crossings) {
+        let rel = |t: &str| {
+            if t.starts_with("\\approx") {
+                t.to_string()
+            } else {
+                format!("= {t}")
+            }
+        };
+        let (bundles, rest) = analysis::bundles(&r.crossings);
+        for bu in &bundles {
+            let side = |v: &[(String, usize)]| {
+                v.iter()
+                    .map(|(l, n)| format!("{n}$\\times$ {}", tex_text(l)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut lines = String::new();
+            for (_, t, ang) in &bu.angles {
+                let rhs = if t.starts_with("\\approx") {
+                    t.clone()
+                } else {
+                    format!("= {t}")
+                };
+                let m = format!("\\lvert\\cos\\angle\\rvert {rhs}");
+                if m.len() > LONG {
+                    let _ = writeln!(
+                        lines,
+                        "\\item $\\angle \\approx {ang:.4}^\\circ$:\\\\ {}",
+                        fitmath(&m)
+                    );
+                } else {
+                    let _ = writeln!(lines, "\\item $\\angle \\approx {ang:.4}^\\circ$: ${m}$");
+                }
+            }
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Bündelpunkt}} ${}$: dort treffen sich {} von {} und {} von {}. Paarwinkel zwischen den beiden Objekten ({} verschiedene):\n\\begin{{itemize}}\n{}\\end{{itemize}}",
+                bu.p.tex,
+                side(&bu.a),
+                tex_text(&r.a),
+                side(&bu.b),
+                tex_text(&r.b),
+                bu.angles.len(),
+                lines
+            );
+        }
+        for g in analysis::crossing_groups(&rest) {
             let pts: Vec<String> = g.6.iter().take(6).map(|p| format!("${}$", p.tex)).collect();
             let _ = writeln!(
                 it,
-                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$): $\\lvert\\cos\\angle\\rvert {}$, $\\angle \\approx {:.4}^\\circ$; bei {}{}",
+                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$), $\\angle \\approx {:.4}^\\circ$: {} bei {}{}",
                 g.2,
                 tex_text(&g.0),
                 tex_text(&g.1),
                 g.6.len(),
-                if g.4.starts_with("\\approx") { g.4.clone() } else { format!("= {}", g.4) },
                 g.5,
+                centered(&format!("\\lvert\\cos\\angle\\rvert {}", rel(&g.4))),
                 pts.join(", "),
                 if g.6.len() > 6 { ", \\ldots" } else { "" }
             );
@@ -359,16 +429,21 @@ fn latex_interactions(inters: &[InterRes]) -> String {
                 .as_ref()
                 .map(|e| format!(", je ${e}$"))
                 .unwrap_or_default();
+            let total = if p.total_tex.starts_with("\\approx") {
+                format!("Innenlänge gesamt ${}$", p.total_tex)
+            } else {
+                format!("Innenlänge gesamt {}", centered(&p.total_tex))
+            };
             let _ = writeln!(
                 it,
-                "\\item \\textbf{{{}}} von {} in {}: {} ({}$\\times${}), Innenlänge gesamt ${}$",
+                "\\item \\textbf{{{}}} von {} in {}: {} ({}$\\times${}), {}",
                 tex_text(&p.label),
-                clean_label(&p.owner),
-                clean_label(&p.body),
+                tex_text(&p.owner),
+                tex_text(&p.body),
                 tex_text(p.kind),
                 p.count,
                 each,
-                p.total_tex
+                total
             );
         }
         for (a, b, l) in &r.overlaps {
@@ -412,7 +487,7 @@ pub fn latex_document(
     inters: &[InterRes],
 ) -> String {
     let mut s = String::from(
-        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb}\n\\usepackage[a4paper,margin=2cm]{geometry}\n",
+        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb,graphicx}\n\\usepackage[a4paper,margin=2cm]{geometry}\n",
     );
     if !profs.is_empty() {
         s.push_str("\\usepackage{pgfplots}\n\\pgfplotsset{compat=1.18}\n");
