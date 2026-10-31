@@ -49,8 +49,35 @@ fn clean_label_ascii(s: &str) -> String {
 pub fn tex_text(s: &str) -> String {
     let mut out = String::new();
     let mut chars = s.chars().peekable();
+    const SUP: &str = "⁻⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const SUB: &str = "₀₁₂₃₄₅₆₇₈₉";
     while let Some(c) = chars.next() {
         let m = |x: &str| format!("\\ensuremath{{{x}}}");
+        // Hoch-/Tiefstellungen als zusammenhängender Lauf: ρ⁻¹ → ρ^{-1}, σ₁₀ → σ_{10}
+        if SUP.contains(c) || SUB.contains(c) {
+            let sup = SUP.contains(c);
+            let conv = |d: char| -> char {
+                if d == '⁻' {
+                    '-'
+                } else if sup {
+                    char::from_digit(SUP.chars().position(|x| x == d).unwrap() as u32 - 1, 10)
+                        .unwrap()
+                } else {
+                    char::from_digit(SUB.chars().position(|x| x == d).unwrap() as u32, 10).unwrap()
+                }
+            };
+            let mut run = String::from(conv(c));
+            while let Some(&d) = chars.peek() {
+                if (sup && SUP.contains(d)) || (!sup && SUB.contains(d)) {
+                    run.push(conv(d));
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            out.push_str(&m(&format!("{}{{{run}}}", if sup { '^' } else { '_' })));
+            continue;
+        }
         let piece = match c {
             '&' | '%' | '$' | '#' | '_' | '{' | '}' => format!("\\{c}"),
             '\\' => "\\textbackslash{}".into(),
@@ -120,13 +147,7 @@ pub fn tex_text(s: &str) -> String {
             '°' => m("^\\circ"),
             'ℝ' => m("\\mathbb{R}"),
             'ℓ' => m("\\ell"),
-            '²' => m("^2"),
-            '³' => m("^3"),
-            '⁴' => m("^4"),
-            '⁵' => m("^5"),
-            '⁶' => m("^6"),
             'ᶠ' => m("^f"),
-            '₀'..='₉' => m(&format!("_{}", c as u32 - '₀' as u32)),
             'ₕ' => m("_h"),
             'ᵥ' => m("_v"),
             'ₛ' => m("_s"),
@@ -424,11 +445,13 @@ fn latex_interactions(inters: &[InterRes]) -> String {
             );
         }
         for p in &r.pierces {
-            let each = p
-                .each_tex
-                .as_ref()
-                .map(|e| format!(", je ${e}$"))
-                .unwrap_or_default();
+            // bei einer einzigen Strebe ist „je“ gleich der Gesamtlänge; lange Formeln abgesetzt
+            let each = match &p.each_tex {
+                Some(_) if p.count == 1 => String::new(),
+                Some(e) if e.len() > 90 => format!(", je {}", centered(e)),
+                Some(e) => format!(", je ${e}$"),
+                None => String::new(),
+            };
             let total = if p.total_tex.starts_with("\\approx") {
                 format!("Innenlänge gesamt ${}$", p.total_tex)
             } else {
@@ -676,4 +699,19 @@ pub fn stl_struts(name: &str, segs: &[(DVec3, DVec3)], radius: f64, scale: f64) 
     }
     let _ = writeln!(s, "endsolid {name}");
     s
+}
+
+#[cfg(test)]
+mod tex_tests {
+    #[test]
+    fn hoch_und_tiefstellungen() {
+        assert_eq!(
+            super::tex_text("Kegel ρ⁻¹"),
+            "Kegel \\ensuremath{\\rho}\\ensuremath{^{-1}}"
+        );
+        assert_eq!(
+            super::tex_text("σ₁₀ x²"),
+            "\\ensuremath{\\sigma}\\ensuremath{_{10}} x\\ensuremath{^{2}}"
+        );
+    }
 }
