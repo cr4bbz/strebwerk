@@ -1590,7 +1590,11 @@ impl Ring {
             outside = self.smul(&outside, &self.sym(q));
             let ri = self.mul(&oddm, &self.c(Q::from_integer(r)));
             let inside = if ri.is_one() { None } else { Some(ri) };
-            return Radical { outside, absm, inside };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
         }
         let mut inside = self.mul(&self.mul(&prim, &oddm), &self.c(Q::from_integer(r)));
         // Vorzeichen-Normierung: Inneres positiv auswerten
@@ -2046,10 +2050,11 @@ impl Ring {
             let s = self.fmt_poly(i, tex);
             if tex {
                 factors.push(format!("\\sqrt{{{s}}}"));
-            } else if self.poly_terms(i, false).len() > 1 || s.contains(' ') {
-                factors.push(format!("√({s})"));
-            } else {
+            } else if s.chars().all(|c| c.is_ascii_digit()) || s.chars().count() == 1 {
                 factors.push(format!("√{s}"));
+            } else {
+                // „√6ρ“ wäre mehrdeutig (√6·ρ oder √(6ρ)) – im Klartext immer klammern
+                factors.push(format!("√({s})"));
             }
         }
         let body = if tex {

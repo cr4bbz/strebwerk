@@ -11,6 +11,7 @@ Native Desktop-App in Rust (egui, gerendert über wgpu: Vulkan / Metal / DX12 / 
 cargo run --release                                  # leere Startszene
 cargo run --release -- examples/demo.strebwerk       # Szene direkt öffnen
 cargo run --release -- --tex examples/interaktion.strebwerk   # LaTeX-Export ohne Fenster
+cargo run --release -- --mcp --root szenen           # Werkzeug-Server für Sprachmodelle (MCP)
 cargo test                                           # Algebra, Geometrie, Topologie, Schnitte, Interaktionen
 ```
 
@@ -71,6 +72,62 @@ Die Datei-Dialoge laufen über das XDG-Portal.
 zum 3D-Drucken (Streben als Stäbe, Knoten als Oktaeder, Maßstab einstellbar).
 Szenen werden als lesbares JSON gespeichert (`.strebwerk`).
 
+## Sprachmodelle (MCP)
+
+`strebwerk --mcp` startet Strebwerk ohne Fenster als Werkzeug-Server nach dem
+[Model Context Protocol](https://modelcontextprotocol.io) (JSON-RPC über stdio). Ein Sprachmodell
+in Claude Desktop, Claude Code oder einem anderen MCP-Client kann damit Szenen bauen und auswerten.
+Dabei gilt eine klare Arbeitsteilung: **Das Modell entscheidet, was gebaut wird; jede Formel,
+Länge, jeder Winkel und jede Potenzform kommt aus der exakten Algebra von Strebwerk.**
+
+| Werkzeug | Zweck |
+|---|---|
+| `scene_info`, `scene_json` | Überblick bzw. vollständiges JSON der Szene |
+| `new_scene`, `load_scene`, `save_scene` | Szenen anlegen, laden, speichern (`save_scene` setzt die Arbeitsdatei) |
+| `list_templates`, `add_template` | Vorlagen (Platonische Körper, Quader 1 × ρ × ρ³, Antiprismen, Flächen, Kurven …) |
+| `add_points` | freie Konstruktion aus exakten Punkten, z. B. `[["1","rho","rho^3"], …]` |
+| `add_object`, `update_object`, `remove_object` | beliebige Objekte im Strebwerk-Format; Änderungen als JSON-Patch |
+| `set_param`, `add_generator` | Parameter (bleiben in Formeln Unbestimmte) und eigene Zahlkörper-Generatoren |
+| `add_section`, `remove_section`, `sections` | Schnittebenen mit exaktem Polygon, A, U und Cavalieri-Profil |
+| `analyze` | alle exakten Formeln eines Objekts inkl. Potenzformen und Symmetriegruppe |
+| `interactions` | Knoten, Kreuzungen, Stöße, Bündelpunkte, Durchstoßungen zwischen Objekten |
+| `evaluate`, `distance`, `angle` | exakte Vereinfachung, Abstand, Winkel (cos², cos, Potenzform) |
+| `export_tex`, `undo` | LaTeX-Dokument wie aus der GUI; letzte Änderung zurücknehmen |
+
+**Sicherheit**: Dateien werden nur innerhalb des mit `--root` freigegebenen Ordners gelesen und
+geschrieben (Standard: aktuelles Verzeichnis), nur `.strebwerk`/`.json` bzw. `.tex`. Ausdrücke laufen
+ausschließlich durch den eigenen Parser. Fehlerhafte Änderungen (Parse-Fehler, unbekannte Felder,
+ungültige Objekte) werden abgewiesen, die Szene bleibt dann unverändert.
+
+**Live mit der GUI**: Nach `save_scene` speichert der Server jede Änderung automatisch. Ist dieselbe
+Datei in der GUI geöffnet, lädt sie Änderungen sofort nach (solange dort nichts ungespeichert ist,
+sonst bietet *Datei ▸ Neu laden* es an). Umgekehrt übernimmt der Server vor jedem Befehl, was in der
+GUI gespeichert wurde (*Datei ▸ Speichern*).
+
+**Einrichten in Claude Desktop** (Windows: `%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "strebwerk": {
+      "command": "C:\\Pfad\\zu\\strebwerk\\target\\release\\strebwerk.exe",
+      "args": ["--mcp", "--root", "C:\\Users\\Julian\\Documents\\strebwerk-szenen"]
+    }
+  }
+}
+```
+
+Danach Claude Desktop neu starten. **Claude Code**:
+`claude mcp add strebwerk -- C:\Pfad\zu\strebwerk.exe --mcp --root C:\Users\Julian\Documents\strebwerk-szenen`.
+
+Zum Ausprobieren ohne Client (eine JSON-RPC-Nachricht pro Zeile):
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"evaluate","arguments":{"expr":"sqrt(2+2*rho+2*rho^2)"}}}' \
+  | strebwerk --mcp
+# → exakt: √(2 + 2ρ + 2ρ²) = √2·ρ^(5/2)
+```
+
 ## Aufbau
 
 | Datei | Inhalt |
@@ -84,6 +141,7 @@ Szenen werden als lesbares JSON gespeichert (`.strebwerk`).
 | `src/render.rs` | Kamera und tiefensortierte Darstellung |
 | `src/app.rs` | Oberfläche |
 | `src/export.rs` | LaTeX, TikZ, STL |
+| `src/mcp.rs` | Befehlsschicht und MCP-Server (`--mcp`) |
 
 ## Genauigkeit und Grenzen
 

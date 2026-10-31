@@ -54,6 +54,23 @@ pub struct App {
     tikz_width: f64,
     fit_pending: bool,
     last_items: Vec<render::Item>,
+    /// geöffnete Szenendatei, die auf externe Änderungen (z. B. vom MCP-Server) beobachtet wird
+    watch: Option<Watch>,
+}
+
+/// Beobachtete Szenendatei: wird nachgeladen, sobald sie sich auf der Platte ändert.
+struct Watch {
+    path: std::path::PathBuf,
+    mtime: Option<std::time::SystemTime>,
+    /// Szene (JSON) beim letzten Abgleich mit der Datei – Abweichung = lokale Änderungen
+    disk: String,
+    last_check: std::time::Instant,
+    /// extern geändert, aber wegen lokaler Änderungen nicht automatisch geladen
+    pending: bool,
+}
+
+fn mtime_of(p: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
 }
 
 impl App {
@@ -78,6 +95,7 @@ impl App {
         let mut cam = Camera::default();
         let mut status = "Willkommen bei Strebwerk. Links ziehen: drehen · rechts/mittel ziehen: verschieben · Rad: zoomen".to_string();
         let mut fit_pending = true;
+        let mut watch_path = None;
         if let Some(path) = std::env::args().nth(1) {
             match std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
@@ -88,12 +106,13 @@ impl App {
                     cam = f.camera;
                     fit_pending = false;
                     status = format!("Geöffnet: {path}");
+                    watch_path = Some(std::path::PathBuf::from(&path));
                 }
                 Err(e) => status = format!("Konnte {path} nicht öffnen: {e}"),
             }
         }
         let selected = scene.objects.first().map(|o| o.id);
-        App {
+        let mut app = App {
             scene,
             cam,
             built: HashMap::new(),
@@ -119,6 +138,88 @@ impl App {
             tikz_width: 12.0,
             fit_pending,
             last_items: vec![],
+            watch: None,
+        };
+        if let Some(p) = watch_path {
+            app.set_watch(p);
+        }
+        app
+    }
+
+    // ------------------------------------------------------------------ Dateibeobachtung
+
+    fn set_watch(&mut self, path: std::path::PathBuf) {
+        self.watch = Some(Watch {
+            mtime: mtime_of(&path),
+            path,
+            disk: serde_json::to_string(&self.scene).unwrap_or_default(),
+            last_check: std::time::Instant::now(),
+            pending: false,
+        });
+    }
+
+    /// Datei neu einlesen; `force` verwirft lokale Änderungen.
+    fn reload_watched(&mut self, force: bool) {
+        let Some(w) = &self.watch else { return };
+        let path = w.path.clone();
+        let local_edits = serde_json::to_string(&self.scene).unwrap_or_default() != w.disk;
+        if local_edits && !force {
+            if let Some(w) = &mut self.watch {
+                w.pending = true;
+                w.mtime = mtime_of(&path);
+            }
+            self.status =
+                "Datei wurde extern geändert – Datei ▸ Neu laden übernimmt sie (lokale Änderungen gehen verloren)".into();
+            return;
+        }
+        let res: Result<SaveFile, String> = std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()));
+        match res {
+            Ok(f) => {
+                let ids = |sc: &Scene| sc.objects.iter().map(|o| o.id).collect::<Vec<_>>();
+                let ids_before = ids(&self.scene);
+                self.scene = f.scene;
+                if !self
+                    .scene
+                    .objects
+                    .iter()
+                    .any(|o| Some(o.id) == self.selected)
+                {
+                    self.selected = self.scene.objects.first().map(|o| o.id);
+                }
+                // neue oder entfernte Objekte: Ansicht anpassen; bloße Änderungen lassen die Kamera
+                if ids(&self.scene) != ids_before && !self.scene.objects.is_empty() {
+                    self.fit_pending = true;
+                }
+                self.set_watch(path);
+                let (n, k) = (self.scene.objects.len(), self.scene.sections.len());
+                self.status = format!(
+                    "Extern geändert – neu geladen ({n} {}, {k} {})",
+                    if n == 1 { "Objekt" } else { "Objekte" },
+                    if k == 1 {
+                        "Schnittebene"
+                    } else {
+                        "Schnittebenen"
+                    }
+                );
+            }
+            // halb geschriebene Datei: beim nächsten Blick erneut versuchen
+            Err(_) if !force => {}
+            Err(e) => self.status = format!("Neu laden fehlgeschlagen: {e}"),
+        }
+    }
+
+    fn poll_watch(&mut self, ctx: &egui::Context) {
+        let Some(w) = &mut self.watch else { return };
+        ctx.request_repaint_after(std::time::Duration::from_millis(700));
+        if w.last_check.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        w.last_check = std::time::Instant::now();
+        let now = mtime_of(&w.path);
+        if now.is_some() && now != w.mtime && !w.pending {
+            self.reload_watched(false);
         }
     }
 
@@ -234,7 +335,31 @@ impl App {
             .map_err(|e| e.to_string())
             .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
         {
-            Ok(()) => self.status = format!("Gespeichert: {}", path.display()),
+            Ok(()) => {
+                self.status = format!("Gespeichert: {}", path.display());
+                self.set_watch(path);
+            }
+            Err(e) => self.status = format!("Speichern fehlgeschlagen: {e}"),
+        }
+    }
+
+    /// In die beobachtete Datei speichern (ohne Dialog).
+    fn save_watched(&mut self) {
+        let Some(w) = &self.watch else { return };
+        let path = w.path.clone();
+        let f = SaveFile {
+            format: "strebwerk-1".into(),
+            scene: self.scene.clone(),
+            camera: self.cam.clone(),
+        };
+        match serde_json::to_string_pretty(&f)
+            .map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+        {
+            Ok(()) => {
+                self.status = format!("Gespeichert: {}", path.display());
+                self.set_watch(path);
+            }
             Err(e) => self.status = format!("Speichern fehlgeschlagen: {e}"),
         }
     }
@@ -256,6 +381,7 @@ impl App {
                 self.selected = self.scene.objects.first().map(|o| o.id);
                 self.built.clear();
                 self.status = format!("Geöffnet: {}", path.display());
+                self.set_watch(path);
             }
             Err(e) => self.status = format!("Öffnen fehlgeschlagen: {e}"),
         }
@@ -336,11 +462,33 @@ impl App {
                     self.selected = self.scene.objects.first().map(|o| o.id);
                     self.built.clear();
                     self.fit_pending = true;
+                    self.watch = None;
                     ui.close_menu();
                 }
                 if ui.button("Öffnen …").clicked() {
                     ui.close_menu();
                     self.open();
+                }
+                if let Some(w) = &self.watch {
+                    let name = w
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let pending = w.pending;
+                    if ui.button(format!("Speichern ({name})")).clicked() {
+                        ui.close_menu();
+                        self.save_watched();
+                    }
+                    let lbl = if pending { "Neu laden (extern geändert!)" } else { "Neu laden" };
+                    if ui
+                        .button(lbl)
+                        .on_hover_text("Datei wird automatisch nachgeladen, solange es keine lokalen Änderungen gibt (z. B. wenn ein Sprachmodell über strebwerk --mcp an ihr arbeitet).")
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.reload_watched(true);
+                    }
                 }
                 if ui.button("Speichern unter …").clicked() {
                     ui.close_menu();
@@ -1085,6 +1233,7 @@ impl eframe::App for App {
         if self.animate(dt) {
             ctx.request_repaint();
         }
+        self.poll_watch(ctx);
         self.rebuild();
         self.reanalyze();
         if self.fit_pending {
