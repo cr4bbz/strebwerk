@@ -988,7 +988,11 @@ impl Ring {
             return None;
         }
         if let Some(c) = x.as_constant() {
-            return rational_sqrt(&c).map(|r| self.c(r));
+            if let Some(r) = rational_sqrt(&c) {
+                return Some(self.c(r));
+            }
+            // rationale Zahl, deren Wurzel in einem einfachen Generator liegt (√2 ∈ ℚ(√2), √5 ∈ ℚ(φ) …)
+            return (0..self.ng()).find_map(|gi| self.ksqrt_in(x, gi));
         }
         let ng = self.ng();
         let used: BTreeSet<usize> =
@@ -998,7 +1002,11 @@ impl Ring {
         if used.len() != 1 {
             return None;
         }
-        let gi = *used.iter().next().unwrap();
+        self.ksqrt_in(x, *used.iter().next().unwrap())
+    }
+
+    /// Wurzel eines Elements von ℚ(g_gi) in ℚ(g_gi), über die Konjugierten gesucht und exakt geprüft.
+    fn ksqrt_in(&self, x: &Poly, gi: usize) -> Option<Poly> {
         let g = &self.gens[gi];
         if g.def.qpoly.is_none() || g.roots.len() != g.def.degree as usize {
             return None;
@@ -1122,7 +1130,263 @@ impl Ring {
         if let Some(inv) = self.inv_k(&s.den) {
             return self.sym(self.mul(&s.num, &inv));
         }
-        s
+        let ng = self.ng();
+        let np = self.params.len();
+        let (mut num, mut den) = (s.num, s.den);
+        // Nenner = k·m mit k ∈ K und Monom m? Dann k invertieren.
+        let pparts: BTreeSet<Vec<u32>> = den.t.keys().map(|e| e[ng..].to_vec()).collect();
+        if pparts.len() == 1 {
+            let mut k = Poly::zero();
+            for (e, c) in &den.t {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                k = k.add(&Poly::monomial(ek, c.clone()));
+            }
+            if let Some(ik) = self.inv_k(&k) {
+                num = self.mul(&num, &ik);
+                den = self.param_mono(pparts.iter().next().unwrap());
+            }
+        }
+        // gemeinsames Parametermonom kürzen
+        let mins = |p: &Poly| -> Vec<u32> {
+            let mut m = vec![u32::MAX; np];
+            for e in p.t.keys() {
+                for j in 0..np {
+                    m[j] = m[j].min(e[ng + j]);
+                }
+            }
+            m
+        };
+        let (mn, md) = (mins(&num), mins(&den));
+        let g: Vec<u32> = mn.iter().zip(&md).map(|(a, b)| *a.min(b)).collect();
+        if g.iter().any(|x| *x > 0) {
+            let shift = |p: &Poly| -> Poly {
+                Poly {
+                    t: p.t
+                        .iter()
+                        .map(|(e, c)| {
+                            let mut e2 = e.clone();
+                            for j in 0..np {
+                                e2[ng + j] -= g[j];
+                            }
+                            (e2, c.clone())
+                        })
+                        .collect(),
+                }
+            };
+            num = shift(&num);
+            den = shift(&den);
+        }
+        if let Some(inv) = self.inv_k(&den) {
+            return self.sym(self.mul(&num, &inv));
+        }
+        if let Some(q) = self.pdiv(&num, &den) {
+            return self.sym(q);
+        }
+        Sym { num, den }
+    }
+
+    /// Parameter durch ihre aktuellen Werte ersetzen, sofern diese rational aussehen
+    /// (Nenner ≤ 1000). Liefert das Ergebnis in K und eine Beschreibung wie „h = 1“.
+    pub fn at_params(&self, s: &Sym) -> Option<(Sym, String, String)> {
+        let ng = self.ng();
+        let np = self.params.len();
+        let used: BTreeSet<usize> = s
+            .num
+            .t
+            .keys()
+            .chain(s.den.t.keys())
+            .flat_map(|e| (0..np).filter(move |j| e[ng + j] > 0))
+            .collect();
+        if used.is_empty() {
+            return None;
+        }
+        let mut vals: Vec<Option<Q>> = vec![None; np];
+        for j in &used {
+            vals[*j] = Some(rationalize(self.params[*j].value, 1000, 1e-12)?);
+        }
+        let sub = |p: &Poly| -> Poly {
+            let mut out = Poly::zero();
+            for (e, c) in &p.t {
+                let mut c = c.clone();
+                let mut e2 = e.clone();
+                for j in 0..np {
+                    for _ in 0..e[ng + j] {
+                        c *= vals[j].clone().unwrap_or_else(|| qi(1));
+                    }
+                    e2[ng + j] = 0;
+                }
+                out = out.add(&Poly::monomial(e2, c));
+            }
+            out
+        };
+        let den = sub(&s.den);
+        if den.is_zero() {
+            return None;
+        }
+        let res = self.normalize(Sym {
+            num: sub(&s.num),
+            den,
+        });
+        let desc: Vec<(String, String)> = used
+            .iter()
+            .map(|j| {
+                let q = vals[*j].clone().unwrap();
+                (
+                    format!("{} = {}", self.params[*j].name, self.fmt_q(&q, false)),
+                    format!("{} = {}", self.params[*j].name, self.fmt_q(&q, true)),
+                )
+            })
+            .collect();
+        Some((
+            res,
+            desc.iter()
+                .map(|d| d.0.clone())
+                .collect::<Vec<_>>()
+                .join(", "),
+            desc.iter()
+                .map(|d| d.1.clone())
+                .collect::<Vec<_>>()
+                .join(",\\ "),
+        ))
+    }
+
+    /// Exakte Division in K[Parameter] (None, falls nicht teilbar).
+    pub fn pdiv(&self, num: &Poly, den: &Poly) -> Option<Poly> {
+        if den.is_zero() {
+            return None;
+        }
+        let ng = self.ng();
+        let split = |q: &Poly| -> BTreeMap<Vec<u32>, Poly> {
+            let mut g: BTreeMap<Vec<u32>, Poly> = BTreeMap::new();
+            for (e, c) in &q.t {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                let ent = g.entry(e[ng..].to_vec()).or_default();
+                *ent = ent.add(&Poly::monomial(ek, c.clone()));
+            }
+            g
+        };
+        let ord = |m: &Vec<u32>| (m.iter().sum::<u32>(), m.clone());
+        let lead = |q: &Poly| -> Option<(Vec<u32>, Poly)> {
+            split(q)
+                .into_iter()
+                .max_by(|a, b| ord(&a.0).cmp(&ord(&b.0)))
+        };
+        let (md, kd) = lead(den)?;
+        let ikd = self.inv_k(&kd)?;
+        let mut q = Poly::zero();
+        let mut rem = num.clone();
+        for _ in 0..400 {
+            if rem.is_zero() {
+                return Some(q);
+            }
+            let (mr, kr) = lead(&rem)?;
+            if mr.iter().zip(&md).any(|(a, b)| a < b) {
+                return None;
+            }
+            let mt: Vec<u32> = mr.iter().zip(&md).map(|(a, b)| a - b).collect();
+            let t = self.mul(&self.mul(&kr, &ikd), &self.param_mono(&mt));
+            q = q.add(&t);
+            rem = rem.sub(&self.mul(&t, den));
+        }
+        None
+    }
+
+    /// Reine Potenz: x = A·gᵐ mit A ∈ ℚ, für parameterfreie x in einem einfachen Generator g.
+    pub fn power_form(&self, x: &Poly) -> Option<(Q, usize, i64)> {
+        if x.is_zero() || !self.is_param_free(x) || x.as_constant().is_some() {
+            return None;
+        }
+        let ng = self.ng();
+        let used: BTreeSet<usize> =
+            x.t.keys()
+                .flat_map(|e| (0..ng).filter(move |i| e[*i] > 0))
+                .collect();
+        if used.len() != 1 {
+            return None;
+        }
+        let gi = *used.iter().next().unwrap();
+        self.gens[gi].def.qpoly.as_ref()?;
+        let mut e = vec![0; self.n()];
+        e[gi] = 1;
+        let g = Poly::monomial(e, qi(1));
+        let ginv = self.inv_k(&g)?;
+        let (mut up, mut down) = (x.clone(), x.clone());
+        for m in 0..=40i64 {
+            if let Some(c) = up.as_constant() {
+                return Some((c, gi, m));
+            }
+            if m > 0 {
+                if let Some(c) = down.as_constant() {
+                    return Some((c, gi, -m));
+                }
+            }
+            up = self.mul(&up, &ginv);
+            down = self.mul(&down, &g);
+        }
+        None
+    }
+
+    /// √(A·gᵐ) bzw. A·gᵐ lesbar: z. B. √2·ρ^{5/2}, ρ⁴, ρ⁻³.
+    pub fn fmt_power(&self, a: &Q, gi: usize, m: i64, sqrt: bool, tex: bool) -> String {
+        let g = &self.gens[gi].def;
+        let base = if tex { g.tex.clone() } else { g.uni.clone() };
+        let exp = |num: i64, den: i64| -> String {
+            if den == 1 && num == 1 {
+                return base.clone();
+            }
+            let e = if den == 1 {
+                num.to_string()
+            } else {
+                format!("{num}/{den}")
+            };
+            if tex {
+                format!("{base}^{{{e}}}")
+            } else if den == 1 && num > 0 {
+                format!("{base}{}", superscript(num as u32))
+            } else if den == 1 {
+                format!("{base}⁻{}", superscript(num.unsigned_abs() as u32))
+            } else {
+                format!("{base}^({e})")
+            }
+        };
+        let (coef, pw) = if sqrt {
+            let c = match rational_sqrt(a) {
+                Some(r) => self.fmt_q(&r, tex),
+                None => {
+                    // √(n/d) = (s/d)·√r mit n·d = s²·r
+                    let (s, r) = square_split(&(a.numer() * a.denom()));
+                    let q = Q::new(s, a.denom().clone());
+                    let root = if tex {
+                        format!("\\sqrt{{{r}}}")
+                    } else {
+                        format!("√{r}")
+                    };
+                    if q.is_one() {
+                        root
+                    } else if tex {
+                        format!("{}\\,{root}", self.fmt_q(&q, true))
+                    } else {
+                        format!("{}·{root}", self.fmt_q(&q, false))
+                    }
+                }
+            };
+            (c, if m % 2 == 0 { exp(m / 2, 1) } else { exp(m, 2) })
+        } else {
+            (self.fmt_q(a, tex), exp(m, 1))
+        };
+        if coef == "1" {
+            pw
+        } else if tex {
+            format!("{coef}\\,{pw}")
+        } else {
+            format!("{coef}·{pw}")
+        }
     }
     pub fn sadd(&self, a: &Sym, b: &Sym) -> Sym {
         if a.den == b.den {
@@ -1255,8 +1519,52 @@ impl Ring {
         };
         let oddm = self.param_mono(&odd);
 
-        if self.is_param_free(&pr) {
-            if let Some(k) = self.ksqrt(&pr) {
+        if let Some(k) = self.psqrt(&pr) {
+            outside = self.smul(&outside, &self.sym(k));
+            let inside = if oddm.is_one() { None } else { Some(oddm) };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
+        }
+        // √x = q·g für einen quadratischen Turmgenerator g mit g² = R (z. B. σ₁₀² = 3 − φ):
+        // x/R ein Quadrat in K ⇒ √x ∈ K
+        if let Some(root) = self.ksqrt_any(&pr) {
+            outside = self.smul(&outside, &self.sym(root));
+            let inside = if oddm.is_one() { None } else { Some(oddm) };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
+        }
+        // Quadratfaktor u² ∈ K aus dem Leitkoeffizienten ziehen: pr = u²·Q,
+        // z. B. (6 − 4√2)h² + 17 − 12√2 = (√2 − 1)²·(2h² + 3 − 2√2)
+        let mut pr = pr;
+        if self.ng() > 0 {
+            if let Some(lead_k) = self.lead_k(&pr).filter(|k| k.as_constant().is_none()) {
+                for r in [
+                    1i64, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30,
+                ] {
+                    let Some(u) = self.ksqrt_any(&lead_k.scale(&qr(1, r))) else {
+                        continue;
+                    };
+                    if u.as_constant().is_some() {
+                        continue; // rationale Faktoren erledigt der Inhalt unten
+                    }
+                    let Some(iu2) = self.inv_k(&self.mul(&u, &u)) else {
+                        continue;
+                    };
+                    let q = self.mul(&pr, &iu2);
+                    if self.fmt_poly(&q, false).len() < self.fmt_poly(&pr, false).len() {
+                        outside = self.smul(&outside, &self.sym(u));
+                        pr = q;
+                        break;
+                    }
+                }
+            }
+            if let Some(k) = self.psqrt(&pr) {
                 outside = self.smul(&outside, &self.sym(k));
                 let inside = if oddm.is_one() { None } else { Some(oddm) };
                 return Radical {
@@ -1279,6 +1587,17 @@ impl Ring {
         let nd = content.numer() * content.denom();
         let (sq, r) = square_split(&nd);
         outside = self.smul(&outside, &self.sym_c(Q::new(sq, content.denom().clone())));
+        // nach dem Herausziehen des Inhalts kann der Rest ein Quadrat sein: 3(s − 3)⁴ → √3·(s − 3)²
+        if let Some(q) = self.psqrt(&prim) {
+            outside = self.smul(&outside, &self.sym(q));
+            let ri = self.mul(&oddm, &self.c(Q::from_integer(r)));
+            let inside = if ri.is_one() { None } else { Some(ri) };
+            return Radical {
+                outside,
+                absm,
+                inside,
+            };
+        }
         let mut inside = self.mul(&self.mul(&prim, &oddm), &self.c(Q::from_integer(r)));
         // Vorzeichen-Normierung: Inneres positiv auswerten
         if self.eval(&inside) < 0.0 && !inside.is_zero() {
@@ -1291,6 +1610,119 @@ impl Ring {
             absm,
             inside,
         }
+    }
+
+    /// Quadratwurzel in K[Parameter], falls `p` ein Quadrat ist (Leitterm-Verfahren in
+    /// graduierter Ordnung, Ergebnis exakt geprüft). Vorzeichen: positiv beim aktuellen Wert.
+    pub fn psqrt(&self, p: &Poly) -> Option<Poly> {
+        if p.is_zero() {
+            return Some(Poly::zero());
+        }
+        if self.is_param_free(p) {
+            return self.ksqrt(p);
+        }
+        let ng = self.ng();
+        let split = |q: &Poly| -> BTreeMap<Vec<u32>, Poly> {
+            let mut g: BTreeMap<Vec<u32>, Poly> = BTreeMap::new();
+            for (e, c) in &q.t {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                let ent = g.entry(e[ng..].to_vec()).or_default();
+                *ent = ent.add(&Poly::monomial(ek, c.clone()));
+            }
+            g
+        };
+        let ord = |m: &Vec<u32>| (m.iter().sum::<u32>(), m.clone());
+        let lead = |q: &Poly| -> Option<(Vec<u32>, Poly)> {
+            split(q)
+                .into_iter()
+                .max_by(|a, b| ord(&a.0).cmp(&ord(&b.0)))
+        };
+        let mono = |m: &[u32], k: &Poly| -> Poly {
+            let mut e = vec![0u32; self.n()];
+            e[ng..].copy_from_slice(m);
+            self.mul(k, &Poly::monomial(e, qi(1)))
+        };
+        let (m0, k0) = lead(p)?;
+        if m0.iter().any(|x| x % 2 == 1) {
+            return None;
+        }
+        let kq = self.ksqrt(&k0)?;
+        let mq: Vec<u32> = m0.iter().map(|x| x / 2).collect();
+        let mut q = mono(&mq, &kq);
+        let inv2 = self.inv_k(&kq.scale(&qi(2)))?;
+        for _ in 0..200 {
+            let rem = p.sub(&self.mul(&q, &q));
+            if rem.is_zero() {
+                if self.eval(&q) < 0.0 {
+                    q = q.neg();
+                }
+                return Some(q);
+            }
+            let (mr, kr) = lead(&rem)?;
+            if mr.iter().zip(&mq).any(|(a, b)| a < b) {
+                return None;
+            }
+            let mt: Vec<u32> = mr.iter().zip(&mq).map(|(a, b)| a - b).collect();
+            if ord(&mt) >= ord(&mq) {
+                return None;
+            }
+            q = q.add(&mono(&mt, &self.mul(&kr, &inv2)));
+        }
+        None
+    }
+
+    /// Quadratwurzel eines parameterfreien Elements in K, auch über quadratische
+    /// Turmgeneratoren (√(3 − φ) = σ₁₀). Positiv beim aktuellen Wert.
+    pub fn ksqrt_any(&self, x: &Poly) -> Option<Poly> {
+        if !self.is_param_free(x) {
+            return None;
+        }
+        if let Some(r) = self.ksqrt(x) {
+            return Some(r);
+        }
+        for (gi, g) in self.gens.iter().enumerate() {
+            if g.def.degree != 2
+                || g.relation.t.keys().any(|e| e[gi] > 0)
+                || !self.is_param_free(&g.relation)
+            {
+                continue;
+            }
+            let Some(ir) = self.inv_k(&g.relation) else {
+                continue;
+            };
+            if let Some(q) = self.ksqrt(&self.mul(x, &ir)) {
+                let mut e = vec![0; self.n()];
+                e[gi] = 1;
+                let mut root = self.mul(&q, &Poly::monomial(e, qi(1)));
+                if self.eval(&root) < 0.0 {
+                    root = root.neg();
+                }
+                return Some(root);
+            }
+        }
+        None
+    }
+
+    /// K-Koeffizient des führenden Parametermonoms (graduierte Ordnung).
+    fn lead_k(&self, p: &Poly) -> Option<Poly> {
+        let ng = self.ng();
+        let lead = p.t.keys().map(|e| e[ng..].to_vec()).max_by(|a, b| {
+            (a.iter().sum::<u32>(), a.clone()).cmp(&(b.iter().sum::<u32>(), b.clone()))
+        })?;
+        let mut k = Poly::zero();
+        for (e, c) in &p.t {
+            if e[ng..] == lead[..] {
+                let mut ek = e.clone();
+                for x in ek[ng..].iter_mut() {
+                    *x = 0;
+                }
+                k = k.add(&Poly::monomial(ek, c.clone()));
+            }
+        }
+        Some(k)
     }
 
     pub fn rad_eval(&self, r: &Radical) -> f64 {
@@ -1476,7 +1908,11 @@ impl Ring {
                 let coef = if coef == "1" { String::new() } else { coef };
                 out.push((neg, Self::compose(&coef, &pm, &gen, tex)));
             } else {
-                // führendes Vorzeichen herausziehen
+                // mit einem positiven Term beginnen, wenn es einen gibt: (ρ² − ρ)h statt −(ρ − ρ²)h
+                let mut kt = kt;
+                if let Some(pos) = kt.iter().position(|(n, _)| !n) {
+                    kt.rotate_left(pos);
+                }
                 let lead_neg = kt[0].0;
                 let kt2: Vec<(bool, String)> = kt
                     .iter()
@@ -1495,7 +1931,15 @@ impl Ring {
     }
 
     pub fn fmt_poly(&self, p: &Poly, tex: bool) -> String {
-        Self::join_terms(&self.poly_terms(p, tex), tex)
+        let mut t = self.poly_terms(p, tex);
+        // führend positiv, sofern möglich – nur ohne Parameter, sonst bleibt die Gradordnung
+        if self.is_param_free(p) && t.first().map(|x| x.0).unwrap_or(false) {
+            if let Some(pos) = t.iter().position(|(n, _)| !n) {
+                let x = t.remove(pos);
+                t.insert(0, x);
+            }
+        }
+        Self::join_terms(&t, tex)
     }
 
     fn wrap(&self, p: &Poly, tex: bool) -> String {
@@ -1527,6 +1971,49 @@ impl Ring {
     }
 
     pub fn fmt_rad(&self, r: &Radical, tex: bool) -> String {
+        // x/(c·I)·√I  =  x/(c·√I); rationalen Inhalt g von I mit √g ∈ K in c ziehen und x/c in K kürzen
+        if let (Some(i), None, false) = (&r.inside, &r.absm, r.outside.den.is_one()) {
+            if let Some(mut c) = self
+                .pdiv(&r.outside.den, i)
+                .filter(|c| self.is_param_free(c))
+            {
+                let mut i = i.clone();
+                let mut g = BigInt::zero();
+                let mut l = BigInt::one();
+                for q in i.t.values() {
+                    g = g.gcd(q.numer());
+                    l = l.lcm(q.denom());
+                }
+                let content = Q::new(g, l);
+                if !content.is_one() && !content.is_zero() {
+                    if let Some(sg) = self.ksqrt_any(&self.c(content.clone())) {
+                        c = self.mul(&c, &sg);
+                        i = i.scale(&content.recip());
+                    }
+                }
+                let (num, cs) = match self.inv_k(&c) {
+                    Some(ic) => (self.mul(&r.outside.num, &ic), String::new()),
+                    None => (r.outside.num.clone(), self.wrap(&c, tex)),
+                };
+                let ns = self.fmt_poly(&num, tex);
+                let is = self.fmt_poly(&i, tex);
+                return if tex {
+                    format!(
+                        "\\frac{{{ns}}}{{{cs}{}\\sqrt{{{is}}}}}",
+                        if cs.is_empty() { "" } else { "\\," }
+                    )
+                } else {
+                    let n = if self.poly_terms(&num, false).len() > 1 {
+                        format!("({ns})")
+                    } else {
+                        ns
+                    };
+                    format!("{n}/({cs}{}√({is}))", if cs.is_empty() { "" } else { "·" })
+                        .replace("/(√(", "/√(")
+                        .replace("))", ")")
+                };
+            }
+        }
         let mut factors: Vec<String> = vec![];
         let mut neg = false;
         // Vorfaktor
@@ -1539,12 +2026,14 @@ impl Ring {
                 if t[0].1 != "1" || (r.inside.is_none() && r.absm.is_none()) {
                     pre = t[0].1.clone();
                 }
+            } else if r.inside.is_none() && r.absm.is_none() {
+                pre = self.fmt_poly(&out.num, tex);
             } else {
                 pre = self.wrap(&out.num, tex);
             }
         } else {
             pre = self.fmt_sym(out, tex);
-            if !tex {
+            if !tex && (r.inside.is_some() || r.absm.is_some()) {
                 pre = format!("({pre})");
             }
         }
@@ -1563,10 +2052,11 @@ impl Ring {
             let s = self.fmt_poly(i, tex);
             if tex {
                 factors.push(format!("\\sqrt{{{s}}}"));
-            } else if self.poly_terms(i, false).len() > 1 || s.contains(' ') {
-                factors.push(format!("√({s})"));
-            } else {
+            } else if s.chars().all(|c| c.is_ascii_digit()) || s.chars().count() == 1 {
                 factors.push(format!("√{s}"));
+            } else {
+                // „√6ρ“ wäre mehrdeutig (√6·ρ oder √(6ρ)) – im Klartext immer klammern
+                factors.push(format!("√({s})"));
             }
         }
         let body = if tex {
@@ -1586,7 +2076,15 @@ impl Ring {
                         .next()
                         .map(|c| c.is_ascii_digit())
                         .unwrap_or(false);
-                    if prev_digit && next_digit || f.starts_with('(') && i > 0 && s.ends_with(')') {
+                    let fraction = prev_digit
+                        && s.rsplit(['·', ' '])
+                            .next()
+                            .map(|w| w.contains('/'))
+                            .unwrap_or(false);
+                    if prev_digit && next_digit
+                        || fraction
+                        || f.starts_with('(') && i > 0 && s.ends_with(')')
+                    {
                         s.push('·');
                     }
                 }
@@ -1721,6 +2219,23 @@ mod tests {
         let x = r.mul(&r.c(qi(12)), &r.mul(&a, &a));
         let rad = r.sqrt(&r.sym(x));
         assert_eq!(r.fmt_rad(&rad, false), "2a√3");
+    }
+
+    #[test]
+    fn poly_sqrt() {
+        let r = ring(&["sqrt2"], &["a", "b"]);
+        let a = r.param_poly("a").unwrap();
+        let b = r.param_poly("b").unwrap();
+        let s2 = r.gen_poly("sqrt2").unwrap();
+        // (√2·a + b)² hat die Wurzel √2·a + b
+        let q = r.mul(&s2, &a).add(&b);
+        let sq = r.psqrt(&r.mul(&q, &q)).unwrap();
+        assert_eq!(sq, q);
+        // a² + b² ist kein Quadrat
+        assert!(r.psqrt(&r.mul(&a, &a).add(&r.mul(&b, &b))).is_none());
+        // √(2(a + b)²) = √2·(a + b), denn 2 ist in ℚ(√2) ein Quadrat
+        let x = r.mul(&r.c(qi(2)), &r.pow(&a.add(&b), 2));
+        assert_eq!(r.fmt_rad(&r.sqrt(&r.sym(x)), false), "a√2 + b√2");
     }
 
     #[test]

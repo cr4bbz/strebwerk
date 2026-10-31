@@ -224,12 +224,40 @@ pub struct Obj {
     pub hidden_classes: Vec<usize>,
 }
 
+/// Schnittebene {x : n·x = d}; Normale und Lage sind Ausdrücke (exakt, falls möglich).
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct Section {
+    pub name: String,
+    pub normal: [String; 3],
+    pub offset: String,
+    pub visible: bool,
+    /// Cavalieri-Profil A(h) über die ganze Ausdehnung mitrechnen
+    #[serde(default)]
+    pub profile: bool,
+}
+
+impl Section {
+    pub fn new(name: &str, axis: usize, offset: &str) -> Section {
+        let mut n = [String::from("0"), String::from("0"), String::from("0")];
+        n[axis] = "1".into();
+        Section {
+            name: name.into(),
+            normal: n,
+            offset: offset.into(),
+            visible: true,
+            profile: true,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct Scene {
     pub params: Vec<Param>,
     pub gens: Vec<CustomGen>,
     pub objects: Vec<Obj>,
     pub next_id: u64,
+    #[serde(default)]
+    pub sections: Vec<Section>,
 }
 
 impl Scene {
@@ -381,6 +409,10 @@ pub struct RFace {
 
 #[derive(Clone, Debug)]
 pub struct RLine {
+    /// Bezeichnung, unter der die Linie an Interaktionen teilnimmt (None = nur Darstellung)
+    pub inter: Option<String>,
+    /// Index in `Built::struts`, falls die Linie eine exakt bekannte Strebe ist
+    pub sref: Option<usize>,
     pub a: DVec3,
     pub b: DVec3,
     pub color: Color32,
@@ -427,6 +459,24 @@ pub struct Built {
     pub warnings: Vec<String>,
     pub section_mesh: Option<Mesh>,
     pub convex: bool,
+    /// Ecken in dem Indexraum, den auch `exact_verts` liefert (inkl. Verschiebung)
+    pub verts: Vec<DVec3>,
+    /// sichtbare, exakt bekannte Streben (Indexpaare in `verts`)
+    pub struts: Vec<StrutRef>,
+    /// Flächen der konvexen Hülle (Indizes in `verts`), falls Körper
+    pub hull_faces: Vec<Vec<usize>>,
+    /// Halbräume n·x ≤ d der Hülle (numerisch, inkl. Verschiebung)
+    pub hull_planes: Vec<(DVec3, f64)>,
+    /// Koordinaten sind exakt in K bekannt
+    pub exact_ok: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct StrutRef {
+    pub i: usize,
+    pub j: usize,
+    pub label: String,
+    pub tex: String,
 }
 
 pub fn class_color(i: usize) -> Color32 {
@@ -474,17 +524,22 @@ fn hash_of<T: Hash>(x: &T) -> u64 {
     h.finish()
 }
 
-struct Ctx<'a> {
+pub(crate) struct Ctx<'a> {
     scene: &'a Scene,
-    custom: Vec<GenDef>,
-    env: Env,
+    pub(crate) custom: Vec<GenDef>,
+    pub(crate) env: Env,
 }
 
-impl Ctx<'_> {
-    fn params(&self) -> Vec<String> {
+impl<'a> Ctx<'a> {
+    pub(crate) fn new(scene: &'a Scene) -> Ctx<'a> {
+        let (custom, _) = scene.custom_gendefs();
+        let env = scene.env(&custom);
+        Ctx { scene, custom, env }
+    }
+    pub(crate) fn params(&self) -> Vec<String> {
         self.scene.params.iter().map(|p| p.name.clone()).collect()
     }
-    fn ring(&self, keys: &BTreeSet<String>) -> Result<Ring, String> {
+    pub(crate) fn ring(&self, keys: &BTreeSet<String>) -> Result<Ring, String> {
         let defs = resolve_gens(keys, &self.custom)?;
         let ps = self
             .scene
@@ -498,7 +553,7 @@ impl Ctx<'_> {
             .collect();
         Ring::new(defs, ps)
     }
-    fn num(&self, s: &str) -> Result<f64, String> {
+    pub(crate) fn num(&self, s: &str) -> Result<f64, String> {
         expr::num(s, &self.env).map_err(|e| format!("„{s}“: {e}"))
     }
 }
@@ -567,6 +622,10 @@ pub fn build(obj: &Obj, scene: &Scene, cache: &mut Cache) -> Built {
         }
         if let Some(m) = &mut b.section_mesh {
             m.v.iter_mut().for_each(|p| *p += off);
+        }
+        b.verts.iter_mut().for_each(|p| *p += off);
+        for (n, d) in &mut b.hull_planes {
+            *d += n.dot(off);
         }
         b.center += off;
     }
@@ -789,35 +848,46 @@ fn hull_of(r: &Ring, ex: &[V3]) -> Result<(Vec<V3>, Vec<DVec3>, poly::Hull), Str
     Ok((ex2, num2, h))
 }
 
-fn build_polyhedron(
-    obj: &Obj,
-    base: &PolyBase,
-    ops: &[PolyOp],
-    ctx: &Ctx,
-    cache: &mut Cache,
-    b: &mut Built,
-) -> Result<(), String> {
+fn poly_strs<'a>(base: &'a PolyBase, ops: &'a [PolyOp]) -> Vec<&'a String> {
     let mut strs = base_strings(base);
     for op in ops {
         if let PolyOp::Truncate(s) | PolyOp::Scale(s) = op {
             strs.push(s);
         }
     }
-    let exs = parse_all(&strs)?;
-    let mut keys: BTreeSet<String> = base_gens(base).into_iter().collect();
-    for e in &exs {
-        expr::collect_gens(e, &ctx.env, &ctx.params(), &ctx.custom, &mut keys)?;
+    strs
+}
+
+fn keys_of(strs: &[&String], ctx: &Ctx, keys: &mut BTreeSet<String>) -> Result<(), String> {
+    for e in parse_all(strs)? {
+        expr::collect_gens(&e, &ctx.env, &ctx.params(), &ctx.custom, keys)?;
     }
-    let r = ctx.ring(&keys)?;
+    Ok(())
+}
+
+fn poly_keys(base: &PolyBase, ops: &[PolyOp], ctx: &Ctx) -> Result<BTreeSet<String>, String> {
+    let mut keys: BTreeSet<String> = base_gens(base).into_iter().collect();
+    keys_of(&poly_strs(base, ops), ctx, &mut keys)?;
+    Ok(keys)
+}
+
+/// Exakte Ecken, Zahlwerte und Hülle eines Polyeders im Ring `r`.
+fn poly_exact(
+    base: &PolyBase,
+    ops: &[PolyOp],
+    r: &Ring,
+) -> Result<(Vec<V3>, Vec<DVec3>, poly::Hull), String> {
+    let strs = poly_strs(base, ops);
+    let exs = parse_all(&strs)?;
     let nb = base_strings(base).len();
-    let mut ex = base_vertices(&r, base, &exs[..nb])?;
+    let mut ex = base_vertices(r, base, &exs[..nb])?;
     let mut k = nb;
     for op in ops {
         match op {
             PolyOp::Truncate(_) => {
-                let t = ex_exact(&r, &exs[k], &strs[k])?;
+                let t = ex_exact(r, &exs[k], strs[k])?;
                 k += 1;
-                let (e2, _, h) = hull_of(&r, &ex)?;
+                let (e2, _, h) = hull_of(r, &ex)?;
                 let mut edges = BTreeSet::new();
                 for f in &h.faces {
                     for i in 0..f.len() {
@@ -827,34 +897,143 @@ fn build_polyhedron(
                 }
                 let mut nx = vec![];
                 for (p, q) in edges {
-                    let d = poly::v3_sub(&r, &e2[q], &e2[p]);
-                    nx.push(poly::v3_add(&r, &e2[p], &poly::v3_scale(&r, &d, &t)));
-                    nx.push(poly::v3_sub(&r, &e2[q], &poly::v3_scale(&r, &d, &t)));
+                    let d = poly::v3_sub(r, &e2[q], &e2[p]);
+                    nx.push(poly::v3_add(r, &e2[p], &poly::v3_scale(r, &d, &t)));
+                    nx.push(poly::v3_sub(r, &e2[q], &poly::v3_scale(r, &d, &t)));
                 }
                 ex = nx;
             }
             PolyOp::Dual => {
-                let (e2, _, h) = hull_of(&r, &ex)?;
+                let (e2, _, h) = hull_of(r, &ex)?;
                 ex = h
                     .faces
                     .iter()
                     .map(|f| {
-                        let mut s = poly::v3_scale(&r, &e2[f[0]], &r.sym_c(qi(1)));
+                        let mut s = e2[f[0]].clone();
                         for i in &f[1..] {
-                            s = poly::v3_add(&r, &s, &e2[*i]);
+                            s = poly::v3_add(r, &s, &e2[*i]);
                         }
-                        poly::v3_scale(&r, &s, &r.sym_c(qr(1, f.len() as i64)))
+                        poly::v3_scale(r, &s, &r.sym_c(qr(1, f.len() as i64)))
                     })
                     .collect();
             }
             PolyOp::Scale(_) => {
-                let s = ex_exact(&r, &exs[k], &strs[k])?;
+                let s = ex_exact(r, &exs[k], strs[k])?;
                 k += 1;
-                ex = ex.iter().map(|p| poly::v3_scale(&r, p, &s)).collect();
+                ex = ex.iter().map(|p| poly::v3_scale(r, p, &s)).collect();
             }
         }
     }
-    let (ex, num, hull) = hull_of(&r, &ex)?;
+    hull_of(r, &ex)
+}
+
+fn free_exact(pts: &[[String; 3]], r: &Ring) -> Result<Vec<V3>, String> {
+    pts.iter()
+        .map(|p| {
+            let mut v = vec![];
+            for c in p {
+                let e = expr::parse(c).map_err(|e| format!("„{c}“: {e}"))?;
+                v.push(ex_exact(r, &e, c)?);
+            }
+            Ok([v[0].clone(), v[1].clone(), v[2].clone()])
+        })
+        .collect()
+}
+
+/// Generatoren, die ein Objekt für seine exakten Koordinaten (inkl. Verschiebung) braucht.
+pub fn gen_keys(obj: &Obj, scene: &Scene) -> Result<BTreeSet<String>, String> {
+    let ctx = Ctx::new(scene);
+    let mut keys = match &obj.kind {
+        Kind::Polyhedron { base, ops } => poly_keys(base, ops, &ctx)?,
+        Kind::Free { pts, .. } => {
+            let mut k = BTreeSet::new();
+            keys_of(&pts.iter().flatten().collect::<Vec<_>>(), &ctx, &mut k)?;
+            k
+        }
+        _ => {
+            return Err(format!(
+                "{} hat keine exakten Koordinaten",
+                obj.kind.type_name()
+            ))
+        }
+    };
+    keys_of(&obj.offset.iter().collect::<Vec<_>>(), &ctx, &mut keys)?;
+    Ok(keys)
+}
+
+/// Ring über der Szene (alle Parameter) mit den gegebenen Generatoren.
+pub fn scene_ring(scene: &Scene, keys: &BTreeSet<String>) -> Result<Ring, String> {
+    Ctx::new(scene).ring(keys)
+}
+
+/// Generatoren, die Ausdrücke brauchen (z. B. Normale und Lage einer Ebene).
+pub fn gen_keys_of(strs: &[&String], scene: &Scene) -> Result<BTreeSet<String>, String> {
+    let ctx = Ctx::new(scene);
+    let mut k = BTreeSet::new();
+    keys_of(strs, &ctx, &mut k)?;
+    Ok(k)
+}
+
+/// Exakte Ecken im selben Indexraum wie `Built::verts` (inkl. Verschiebung), im Ring `r`.
+pub fn exact_verts(obj: &Obj, r: &Ring) -> Result<Vec<V3>, String> {
+    let with_center = obj.layers.spokes || obj.layers.cone_tet;
+    let avg = |pts: &[V3]| -> V3 {
+        let mut s = pts[0].clone();
+        for p in &pts[1..] {
+            s = poly::v3_add(r, &s, p);
+        }
+        poly::v3_scale(r, &s, &r.sym_c(qr(1, pts.len() as i64)))
+    };
+    let mut v = match &obj.kind {
+        Kind::Polyhedron { base, ops } => {
+            let mut v = poly_exact(base, ops, r)?.0;
+            if with_center {
+                let c = avg(&v);
+                v.push(c);
+            }
+            v
+        }
+        Kind::Free { pts, hull, .. } => {
+            let mut v = free_exact(pts, r)?;
+            if *hull && with_center && v.len() >= 4 {
+                let num: Vec<DVec3> = v.iter().map(|p| poly::v3_eval(r, p)).collect();
+                let keep = poly::dedupe(&num);
+                let kept: Vec<V3> = keep.iter().map(|i| v[*i].clone()).collect();
+                let c = avg(&kept);
+                v.push(c);
+            }
+            v
+        }
+        _ => {
+            return Err(format!(
+                "{} hat keine exakten Koordinaten",
+                obj.kind.type_name()
+            ))
+        }
+    };
+    let mut off = vec![];
+    for c in &obj.offset {
+        let e = expr::parse(c).map_err(|e| format!("Verschiebung „{c}“: {e}"))?;
+        off.push(ex_exact(r, &e, c).map_err(|e| format!("Verschiebung: {e}"))?);
+    }
+    let off: V3 = [off[0].clone(), off[1].clone(), off[2].clone()];
+    if !off.iter().all(|x| r.sis_zero(x)) {
+        v = v.iter().map(|p| poly::v3_add(r, p, &off)).collect();
+    }
+    Ok(v)
+}
+
+fn build_polyhedron(
+    obj: &Obj,
+    base: &PolyBase,
+    ops: &[PolyOp],
+    ctx: &Ctx,
+    cache: &mut Cache,
+    b: &mut Built,
+) -> Result<(), String> {
+    let keys = poly_keys(base, ops, ctx)?;
+    let r = ctx.ring(&keys)?;
+    let (ex, num, hull) = poly_exact(base, ops, &r)?;
     let key = hash_of(&(
         serde_json::to_string(&obj.kind).unwrap_or_default(),
         keys.clone(),
@@ -977,6 +1156,15 @@ fn emit_polyhedron(
         }
     }
     b.section_mesh = Some(sm);
+    b.verts = num.to_vec();
+    b.hull_faces = hull.faces.clone();
+    b.hull_planes = hull
+        .normals
+        .iter()
+        .cloned()
+        .zip(hull.offsets.iter().cloned())
+        .collect();
+    b.exact_ok = !an.classes.is_empty();
     // Flächen-Adjazenz der Kanten
     let mut edge_faces: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     let mut vert_faces: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -1005,6 +1193,8 @@ fn emit_polyhedron(
         if obj.hidden_classes.contains(&ci) {
             continue;
         }
+        let total = an.classes.iter().filter(|d| d.kind == c.kind).count();
+        let (slabel, stex) = strut_label(c, total);
         let show = match c.kind {
             poly::PairKind::Edge => l.edges,
             poly::PairKind::FaceDiag => l.face_diag,
@@ -1015,6 +1205,14 @@ fn emit_polyhedron(
             continue;
         }
         for (p, q) in &c.pairs {
+            b.struts.push(StrutRef {
+                i: *p,
+                j: *q,
+                label: slabel.clone(),
+                tex: stex.clone(),
+            });
+            let sref = Some(b.struts.len() - 1);
+            let inter = Some(slabel.clone());
             if c.kind == poly::PairKind::Edge {
                 let col = if n_edge_classes > 1 {
                     b.class_colors[ci]
@@ -1028,6 +1226,8 @@ fn emit_polyhedron(
                     width: 2.2,
                     faces: edge_faces.get(&(*p, *q)).cloned().unwrap_or_default(),
                     strut: false,
+                    inter,
+                    sref,
                 });
             } else {
                 b.lines.push(RLine {
@@ -1037,6 +1237,8 @@ fn emit_polyhedron(
                     width: 1.6,
                     faces: vec![],
                     strut: true,
+                    inter,
+                    sref,
                 });
             }
         }
@@ -1069,6 +1271,8 @@ fn emit_polyhedron(
                     width: 1.6,
                     faces: vec![],
                     strut: true,
+                    inter: Some("Dualkante".into()),
+                    sref: None,
                 });
             }
         }
@@ -1084,8 +1288,23 @@ fn emit_polyhedron(
         }
     }
     if l.spokes || l.cone_tet {
+        // Eckenschwerpunkt als zusätzliche (exakte) Ecke am Ende von `verts`,
+        // `exact_verts` hängt ihn in derselben Weise an
+        let ci = b.verts.len();
+        b.verts.push(center);
         let col = Color32::from_rgb(200, 200, 210);
-        for p in num {
+        for (i, p) in num.iter().enumerate() {
+            let sref = if b.exact_ok {
+                b.struts.push(StrutRef {
+                    i: ci,
+                    j: i,
+                    label: "Speiche".into(),
+                    tex: "s".into(),
+                });
+                Some(b.struts.len() - 1)
+            } else {
+                None
+            };
             b.lines.push(RLine {
                 a: center,
                 b: *p,
@@ -1093,6 +1312,8 @@ fn emit_polyhedron(
                 width: 1.0,
                 faces: vec![],
                 strut: true,
+                inter: Some("Speiche".into()),
+                sref,
             });
         }
         b.points.push(RPoint {
@@ -1110,6 +1331,17 @@ fn emit_polyhedron(
         for f in &hull.faces {
             tets += f.len() - 2;
             for t in 2..f.len() - 1 {
+                let sref = if b.exact_ok {
+                    b.struts.push(StrutRef {
+                        i: f[0],
+                        j: f[t],
+                        label: "Tetraederkante".into(),
+                        tex: "t".into(),
+                    });
+                    Some(b.struts.len() - 1)
+                } else {
+                    None
+                };
                 b.lines.push(RLine {
                     a: num[f[0]],
                     b: num[f[t]],
@@ -1117,6 +1349,8 @@ fn emit_polyhedron(
                     width: 1.0,
                     faces: vec![],
                     strut: true,
+                    inter: Some("Tetraederkante".into()),
+                    sref,
                 });
             }
         }
@@ -1161,6 +1395,18 @@ fn emit_polyhedron(
     );
 }
 
+/// Kurzbezeichnung einer Abstandsklasse für Streben-Interaktionen.
+fn strut_label(c: &poly::DistClass, total: usize) -> (String, String) {
+    if total > 1 {
+        (
+            format!("{} {}", c.kind.name(), c.sub),
+            format!("{}_{{{}}}", c.kind.tex(), c.sub),
+        )
+    } else {
+        (c.kind.name().to_string(), c.kind.tex().to_string())
+    }
+}
+
 fn brighten(c: Color32) -> Color32 {
     let f = |x: u8| (x as f32 * 0.6 + 255.0 * 0.4) as u8;
     Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
@@ -1179,6 +1425,8 @@ fn emit_symmetry(l: &Layers, pts: &[DVec3], center: DVec3, radius: f64, b: &mut 
                 width: 2.0,
                 faces: vec![],
                 strut: true,
+                inter: None,
+                sref: None,
             });
             b.labels.push((center + e * 1.04, format!("{o}"), col));
         }
@@ -1249,6 +1497,8 @@ fn ring(b: &mut Built, c: DVec3, n: DVec3, rad: f64, col: Color32, w: f32) {
             width: w,
             faces: vec![],
             strut: false,
+            inter: None,
+            sref: None,
         });
     }
 }
@@ -1276,6 +1526,8 @@ fn emit_infill(l: &Layers, region: &Region, lo: DVec3, hi: DVec3, base: Color32,
                 width: 1.0,
                 faces: vec![],
                 strut: true,
+                inter: Some("Gitterstrebe".into()),
+                sref: None,
             });
         }
     }
@@ -1411,11 +1663,43 @@ fn build_free(
                         width: 2.0,
                         faces: vec![],
                         strut: false,
+                        inter: None,
+                        sref: None,
                     });
                 }
             }
         }
+        // Indizes der Hülle (num2) auf die Originalpunkte zurückführen
+        // Schwerpunkt (falls angehängt) bleibt die letzte Ecke
+        let center_extra = b.verts.len() > num2.len();
+        let remap = |i: usize| if i < keep.len() { keep[i] } else { num.len() };
+        for st in &mut b.struts {
+            st.i = remap(st.i);
+            st.j = remap(st.j);
+        }
+        b.hull_faces = b
+            .hull_faces
+            .iter()
+            .map(|f| f.iter().map(|i| keep[*i]).collect())
+            .collect();
+        let c = b.verts.last().cloned();
+        b.verts = num.clone();
+        if center_extra {
+            b.verts.push(c.unwrap());
+        }
+        b.exact_ok = exact_ok;
         for (p, q) in &valid_struts {
+            b.struts.push(StrutRef {
+                i: *p,
+                j: *q,
+                label: format!("Strebe P{p}–P{q}"),
+                tex: format!("P_{{{p}}}P_{{{q}}}"),
+            });
+            let sref = if exact_ok {
+                Some(b.struts.len() - 1)
+            } else {
+                None
+            };
             b.lines.push(RLine {
                 a: num[*p],
                 b: num[*q],
@@ -1423,6 +1707,8 @@ fn build_free(
                 width: 2.4,
                 faces: vec![],
                 strut: true,
+                inter: Some(format!("Strebe P{p}–P{q}")),
+                sref,
             });
         }
         // Punkt-Picking bezieht sich auf die Originalindizes
@@ -1443,6 +1729,8 @@ fn build_free(
     // Gerüst
     b.center = center;
     b.radius = radius;
+    b.verts = num.clone();
+    b.exact_ok = exact_ok;
     if exact_ok {
         let key = hash_of(&(
             serde_json::to_string(&obj.kind).unwrap_or_default(),
@@ -1467,12 +1755,20 @@ fn build_free(
             if c.kind == poly::PairKind::Pair && !l.all_pairs {
                 continue;
             }
+            let total = an.classes.iter().filter(|d| d.kind == c.kind).count();
+            let (slabel, stex) = strut_label(c, total);
             for (p, q) in &c.pairs {
                 let w = if c.kind == poly::PairKind::Strut {
                     2.4
                 } else {
                     1.0
                 };
+                b.struts.push(StrutRef {
+                    i: *p,
+                    j: *q,
+                    label: slabel.clone(),
+                    tex: stex.clone(),
+                });
                 b.lines.push(RLine {
                     a: num[*p],
                     b: num[*q],
@@ -1480,6 +1776,8 @@ fn build_free(
                     width: w,
                     faces: vec![],
                     strut: true,
+                    inter: Some(slabel.clone()),
+                    sref: Some(b.struts.len() - 1),
                 });
             }
         }
@@ -1492,6 +1790,8 @@ fn build_free(
                 width: 2.4,
                 faces: vec![],
                 strut: true,
+                inter: Some(format!("Strebe P{p}–P{q}")),
+                sref: None,
             });
         }
     }
@@ -1562,6 +1862,8 @@ fn emit_mesh_common(obj: &Obj, m: Mesh, b: &mut Built) {
                     width: 1.3,
                     faces: vec![],
                     strut: true,
+                    inter: None,
+                    sref: None,
                 });
             }
         }
@@ -1577,6 +1879,8 @@ fn emit_mesh_common(obj: &Obj, m: Mesh, b: &mut Built) {
                 width: 1.0,
                 faces: vec![],
                 strut: true,
+                inter: None,
+                sref: None,
             });
         }
     }
@@ -1662,6 +1966,8 @@ fn build_param(
                     width: 1.0,
                     faces: vec![],
                     strut: false,
+                    inter: None,
+                    sref: None,
                 });
             }
         }
@@ -1674,6 +1980,8 @@ fn build_param(
                     width: 1.0,
                     faces: vec![],
                     strut: false,
+                    inter: None,
+                    sref: None,
                 });
             }
         }
@@ -1704,6 +2012,8 @@ fn build_param(
                     width: 1.4,
                     faces: vec![],
                     strut: true,
+                    inter: Some("Sehne".into()),
+                    sref: None,
                 });
             }
         }
@@ -1809,6 +2119,8 @@ fn build_curve(
             width: 3.0,
             faces: vec![],
             strut: false,
+            inter: Some("Kurve".into()),
+            sref: None,
         });
     }
     // Ableitungen (zentrale Differenzen)
@@ -1881,10 +2193,11 @@ fn build_curve(
     });
     if closed {
         let ratio = tk / std::f64::consts::PI;
+        // Fáry–Milnor: verknotet ⇒ ∫κ ds > 4π. Nur die Kontraposition liefert eine Aussage.
         let note = if tk < 4.0 * std::f64::consts::PI - 1e-3 {
-            "< 4π ⇒ nach Fáry–Milnor unverknotet"
+            "< 4π ⇒ unverknotet (Kontraposition von Fáry–Milnor; Wert numerisch)"
         } else {
-            "≥ 4π: Fáry–Milnor lässt Verknotung zu (notwendig, nicht hinreichend)"
+            "> 4π: mit Verknotung verträglich, entscheidet aber nichts (Fáry–Milnor: verknotet ⇒ ∫κ ds > 4π, nicht umgekehrt)"
         };
         b.formulas.push(FLine {
             label: "Geschlossene Kurve".into(),
@@ -1915,6 +2228,8 @@ fn build_curve(
                     width: 2.0,
                     faces: vec![],
                     strut: true,
+                    inter: None,
+                    sref: None,
                 });
             }
         }
@@ -1954,6 +2269,8 @@ fn build_curve(
                 width: 1.2,
                 faces: vec![],
                 strut: true,
+                inter: Some("Sehne".into()),
+                sref: None,
             });
         }
     }
@@ -2112,7 +2429,19 @@ pub fn templates() -> Vec<Template> {
         },
         Template {
             group: "Weitere",
-            name: "Plastischer Quader 1 × ρ × ρ²",
+            name: "Gemischter Quader 1 × ρ × ρ³ (binomisch)",
+            make: || Kind::Polyhedron {
+                base: PolyBase::Cuboid {
+                    a: s("1"),
+                    b: s("rho"),
+                    c: s("rho^3"),
+                },
+                ops: vec![],
+            },
+        },
+        Template {
+            group: "Weitere",
+            name: "Van-der-Laan-Quader 1 × ρ × ρ²",
             make: || Kind::Polyhedron {
                 base: PolyBase::Cuboid {
                     a: s("1"),
@@ -2428,7 +2757,7 @@ mod tests {
     fn icosahedron_exact() {
         let b = build_tpl("Ikosaeder");
         // V = 5(3+√5)/12 a³ = (5/6)(1+φ)a³ = 5/6·φ² a³
-        assert_eq!(line(&b, "Volumen").uni, "(5/6 + 5/6·φ)a³");
+        assert_eq!(line(&b, "Volumen").uni, "(5/6 + 5/6·φ)a³ = 5/6·φ²·a³");
         assert_eq!(line(&b, "Euler").uni, "V − E + F = 12 − 30 + 20 = 2");
         assert!(line(&b, "Symmetriegruppe")
             .uni
@@ -2459,7 +2788,7 @@ mod tests {
 
     #[test]
     fn plastic_cuboid() {
-        let b = build_tpl("Plastischer Quader 1 × ρ × ρ²");
+        let b = build_tpl("Van-der-Laan-Quader 1 × ρ × ρ²");
         let d = line(&b, "Raumdiagonale");
         // 1 + ρ² + ρ⁴ = 1 + ρ + 2ρ²
         assert_eq!(d.uni, "√(1 + ρ + 2ρ²)");
@@ -2562,5 +2891,59 @@ mod tests {
         let b = build_tpl("Kleeblattknoten");
         assert!(line(&b, "Geschlossene").uni.contains("Fáry"));
     }
-}
 
+    /// Julians Szene „anti-rho3“: gemischter Quader 1 × ρ × ρ³ und fünfseitiges Antiprisma
+    #[test]
+    fn mixed_cuboid_and_antiprism() {
+        let b = build_tpl("Gemischter Quader 1 × ρ × ρ³ (binomisch)");
+        // Paper, Korollar 2: d² = 2(1 + ρ + ρ²) = 2ρ⁵
+        assert_eq!(
+            line(&b, "Raumdiagonale").uni,
+            "√(2 + 2ρ + 2ρ²) = √2·ρ^(5/2)"
+        );
+        assert_eq!(line(&b, "Volumen").uni, "ρ + ρ² = ρ⁴");
+        let b = build_tpl("Antiprisma (n = 5)");
+        let g = line(&b, "Symmetriegruppe");
+        assert!(g.uni.starts_with("D₅d, Ordnung 20"), "{}", g.uni);
+        // √(3 − φ) liegt im Körper: σ₁₀; √(2 + φ) = φσ₁₀
+        assert_eq!(line(&b, "Kante ℓ₂").uni, "σ₁₀");
+        assert_eq!(line(&b, "Flächendiagonale").uni, "φσ₁₀");
+    }
+
+    /// Quadratfaktoren aus K-Koeffizienten: Diederwinkel Quadrat/Fünfeck–Dreieck der Antiprismen
+    #[test]
+    fn antiprism_dihedral_simplified() {
+        let mk = |n: u32| {
+            let mut sc = default_scene();
+            sc.objects.clear();
+            sc.add(
+                "A",
+                Kind::Polyhedron {
+                    base: PolyBase::Antiprism {
+                        n,
+                        r: "1".into(),
+                        h: "h".into(),
+                    },
+                    ops: vec![],
+                },
+            );
+            let mut cache = Cache::new();
+            build(&sc.objects[0], &sc, &mut cache)
+        };
+        let b4 = mk(4);
+        assert_eq!(
+            line(&b4, "Diederwinkel θ₁").uni,
+            "cos θ = (1 − √2)/√(2h² + 3 − 2√2)"
+        );
+        assert!(line(&b4, "Symmetriegruppe")
+            .uni
+            .starts_with("D₄d, Ordnung 16"));
+        let b5 = mk(5);
+        assert_eq!(
+            line(&b5, "Diederwinkel θ₁").uni,
+            "cos θ = (φ − 2)/√(4h² + 5 − 3φ)"
+        );
+        // Dreiecksfläche mit herausgezogenem σ₁₀
+        assert_eq!(line(&b5, "Flächeninhalt A₁").uni, "1/4·σ₁₀√(4h² + 5 − 3φ)");
+    }
+}

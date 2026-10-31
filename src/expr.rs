@@ -856,7 +856,7 @@ mod tests {
         let ring = Ring::new(resolve_gens(&keys, &[]).unwrap(), vec![]).unwrap();
         let s = exact(&e, &ring).unwrap();
         // cos 72° = (φ − 1)/2
-        assert_eq!(ring.fmt_sym(&s, false), "−1/2 + 1/2·φ");
+        assert_eq!(ring.fmt_sym(&s, false), "1/2·φ − 1/2");
         let e = parse("sqrt(8)").unwrap();
         let mut keys = BTreeSet::new();
         collect_gens(&e, &env, &[], &[], &mut keys).unwrap();

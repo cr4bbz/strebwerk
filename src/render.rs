@@ -135,8 +135,14 @@ fn shade(c: Color32, n: DVec3, light: DVec3, two_sided: bool) -> Color32 {
 pub struct ViewOpts {
     pub grid: bool,
     pub axes: bool,
-    pub section: Option<(DVec3, f64)>,
+    /// Schnittebenen n̂·x = d̂ (normiert) mit Farbe
+    pub sections: Vec<(DVec3, f64, Color32)>,
     pub scene_radius: f64,
+    pub scene_center: DVec3,
+    /// Interaktionsmarken: 0 = gemeinsamer Knoten, 1 = Kreuzung/Stoß, 2 = Durchstoßpunkt
+    pub marks: Vec<(DVec3, u8)>,
+    /// Strebenabschnitte im Inneren eines anderen Körpers
+    pub highlights: Vec<(DVec3, DVec3)>,
 }
 
 /// Sammelt alle Primitive, tiefensortiert (fern → nah).
@@ -346,26 +352,53 @@ pub fn collect(
                 });
             }
         }
-        // Schnittebene
-        if let (Some((n, d)), Some(m)) = (opts.section, &bo.section_mesh) {
-            let (segs, _) = crate::mesh::slice(m, n, d);
-            for (a, c) in segs {
-                push_line(
-                    &mut items,
-                    a,
-                    c,
-                    2.6,
-                    Color32::from_rgb(255, 235, 80),
-                    1,
-                    None,
-                );
+        // Schnittebenen
+        if let Some(m) = &bo.section_mesh {
+            for (n, d, col) in &opts.sections {
+                let (segs, _) = crate::mesh::slice(m, *n, *d);
+                for (a, c) in segs {
+                    push_line(&mut items, a, c, 2.6, *col, 1, None);
+                }
             }
         }
     }
-    if let Some((n, d)) = opts.section {
+    // Interaktionen: Innenabschnitte und Marken
+    for (a, c) in &opts.highlights {
+        let pieces = ((*a - *c).length() / (r * 0.08)).ceil().clamp(1.0, 12.0) as usize;
+        push_line(
+            &mut items,
+            *a,
+            *c,
+            4.5,
+            Color32::from_rgba_unmultiplied(90, 230, 255, 110),
+            pieces,
+            None,
+        );
+    }
+    for (p, k) in &opts.marks {
+        if let Some((s, _)) = proj(*p) {
+            let (col, rad) = match k {
+                0 => (Color32::WHITE, 6.0),
+                1 => (Color32::from_rgb(255, 80, 200), 4.5),
+                _ => (Color32::from_rgb(90, 230, 255), 3.5),
+            };
+            items.push(Item {
+                key: f64::MIN,
+                prim: Prim::Dot(s, rad, col),
+            });
+            if *k == 0 {
+                items.push(Item {
+                    key: f64::MIN,
+                    prim: Prim::Dot(s, 2.5, Color32::from_rgb(20, 20, 30)),
+                });
+            }
+        }
+    }
+    for (n, d, pcol) in &opts.sections {
+        let (n, d) = (*n, *d);
         let u = n.any_orthonormal_vector();
         let v = n.cross(u);
-        let o = n * d;
+        let o = opts.scene_center - n * (n.dot(opts.scene_center) - d);
         let e = r * 1.3;
         let corners = [
             o + (u + v) * e,
@@ -379,7 +412,7 @@ pub fn collect(
                 corners[k],
                 corners[(k + 1) % 4],
                 1.2,
-                Color32::from_rgba_unmultiplied(255, 235, 80, 120),
+                pcol.gamma_multiply(0.5),
                 8,
                 None,
             );

@@ -1,13 +1,30 @@
 //! Export: Formeln als LaTeX, aktuelle Ansicht als TikZ, Gerüst als STL.
 
+use crate::analysis::{self, InterRes, Profile, SectionRes};
 use crate::render::{Item, Prim};
-use crate::scene::{Built, Obj};
+use crate::scene::{Built, Obj, Scene};
 use eframe::egui::{Color32, Pos2};
 use glam::DVec3;
 use std::collections::HashMap;
 use std::fmt::Write;
 
+/// Mathematik, die bei Überbreite auf Zeilenbreite verkleinert wird (graphicx).
+fn fitmath(m: &str) -> String {
+    format!("\\resizebox{{\\ifdim\\width>\\linewidth\\linewidth\\else\\width\\fi}}{{!}}{{$\\displaystyle {m}$}}")
+}
+
+fn centered(m: &str) -> String {
+    format!("\\begin{{center}}{}\\end{{center}}", fitmath(m))
+}
+
+const LONG: usize = 160;
+
+/// Bezeichnungen (Objektnamen, Zeilenbeschriftungen) für LaTeX – Sonderzeichen bleiben erhalten.
 fn clean_label(s: &str) -> String {
+    tex_text(s)
+}
+
+fn clean_label_ascii(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
         match c {
@@ -19,6 +36,8 @@ fn clean_label(s: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            '<' => out.push_str("\\textless{}"),
+            '>' => out.push_str("\\textgreater{}"),
             c if (c as u32) < 0x250 => out.push(c),
             _ => {}
         }
@@ -26,40 +45,483 @@ fn clean_label(s: &str) -> String {
     out
 }
 
-/// LaTeX-Block für ein Objekt (ohne Präambel).
+/// Unicode-Text (wie er in der Oberfläche steht) für LaTeX-Textmodus aufbereiten.
+pub fn tex_text(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    const SUP: &str = "⁻⁰¹²³⁴⁵⁶⁷⁸⁹";
+    const SUB: &str = "₀₁₂₃₄₅₆₇₈₉";
+    while let Some(c) = chars.next() {
+        let m = |x: &str| format!("\\ensuremath{{{x}}}");
+        // Hoch-/Tiefstellungen als zusammenhängender Lauf: ρ⁻¹ → ρ^{-1}, σ₁₀ → σ_{10}
+        if SUP.contains(c) || SUB.contains(c) {
+            let sup = SUP.contains(c);
+            let conv = |d: char| -> char {
+                if d == '⁻' {
+                    '-'
+                } else if sup {
+                    char::from_digit(SUP.chars().position(|x| x == d).unwrap() as u32 - 1, 10)
+                        .unwrap()
+                } else {
+                    char::from_digit(SUB.chars().position(|x| x == d).unwrap() as u32, 10).unwrap()
+                }
+            };
+            let mut run = String::from(conv(c));
+            while let Some(&d) = chars.peek() {
+                if (sup && SUP.contains(d)) || (!sup && SUB.contains(d)) {
+                    run.push(conv(d));
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            out.push_str(&m(&format!("{}{{{run}}}", if sup { '^' } else { '_' })));
+            continue;
+        }
+        let piece = match c {
+            '&' | '%' | '$' | '#' | '_' | '{' | '}' => format!("\\{c}"),
+            '\\' => "\\textbackslash{}".into(),
+            '<' => "\\textless{}".into(),
+            '>' => "\\textgreater{}".into(),
+            '^' => "\\^{}".into(),
+            '~' => "\\~{}".into(),
+            'χ' => m("\\chi"),
+            'π' => m("\\pi"),
+            'φ' => m("\\varphi"),
+            'ρ' => m("\\rho"),
+            'κ' => m("\\kappa"),
+            'τ' => m("\\tau"),
+            'α' => m("\\alpha"),
+            'β' => m("\\beta"),
+            'θ' => m("\\theta"),
+            'γ' => m("\\gamma"),
+            'σ' => m("\\sigma"),
+            'λ' => m("\\lambda"),
+            'μ' => m("\\mu"),
+            'Σ' => m("\\Sigma"),
+            '√' => {
+                // √(…) oder √x
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    let mut inner = String::new();
+                    for d in chars.by_ref() {
+                        match d {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        inner.push(d);
+                    }
+                    format!("\\ensuremath{{\\sqrt{{\\text{{{}}}}}}}", tex_text(&inner))
+                } else {
+                    let mut inner = String::new();
+                    while let Some(d) = chars.peek() {
+                        if d.is_ascii_alphanumeric() || "φρσγα".contains(*d) {
+                            inner.push(*d);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    format!("\\ensuremath{{\\sqrt{{\\text{{{}}}}}}}", tex_text(&inner))
+                }
+            }
+            '·' | '⋅' => m("\\cdot "),
+            '×' => m("\\times "),
+            '≈' => m("\\approx "),
+            '≤' => m("\\leq "),
+            '≥' => m("\\geq "),
+            '⇒' => m("\\Rightarrow "),
+            '→' => m("\\to "),
+            '↔' => m("\\leftrightarrow "),
+            '∫' => m("\\int "),
+            '∬' => m("\\iint "),
+            '−' => m("-"),
+            '–' => "--".into(),
+            '°' => m("^\\circ"),
+            'ℝ' => m("\\mathbb{R}"),
+            'ℓ' => m("\\ell"),
+            'ᶠ' => m("^f"),
+            'ₕ' => m("_h"),
+            'ᵥ' => m("_v"),
+            'ₛ' => m("_s"),
+            'ᵢ' => m("_i"),
+            '⅓' => m("\\tfrac13"),
+            '…' => "\\ldots{}".into(),
+            '„' => ",,".into(),
+            '“' => "``".into(),
+            c if (c as u32) < 0x250 => c.to_string(),
+            _ => String::new(),
+        };
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// LaTeX-Block für ein Objekt (ohne Präambel): Formelzeilen im align*-Block,
+/// reine Textzeilen (Topologie, Symmetrie, Fáry–Milnor …) als Absätze an ihrer Stelle.
 pub fn latex_object(o: &Obj, b: &Built) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "\\subsection*{{{}}}", clean_label(&o.name));
     for d in &b.def_tex {
         let _ = writeln!(s, "\\[ {d} \\]");
     }
-    let lines: Vec<String> = b
-        .formulas
-        .iter()
-        .filter(|l| !l.tex.is_empty())
-        .map(|l| format!("  {} && \\text{{{}}}", l.tex, clean_label(&l.label)))
-        .collect();
-    if !lines.is_empty() {
+    let mut block: Vec<String> = vec![];
+    let flush = |s: &mut String, block: &mut Vec<String>| {
+        if !block.is_empty() {
+            let _ = writeln!(
+                s,
+                "\\begin{{align*}}\n{}\n\\end{{align*}}",
+                block.join(" \\\\\n")
+            );
+            block.clear();
+        }
+    };
+    for l in &b.formulas {
+        // die Definition steht schon als abgesetzte Formel darüber
+        if l.label == "Definition" && !b.def_tex.is_empty() {
+            continue;
+        }
+        if l.tex.is_empty() {
+            flush(&mut s, &mut block);
+            let _ = writeln!(
+                s,
+                "\\noindent\\textbf{{{}:}} {}\\par",
+                clean_label(&l.label),
+                tex_text(&l.uni)
+            );
+        } else if l.tex.len() > LONG {
+            flush(&mut s, &mut block);
+            let m = l.tex.replace("&=", "=").replace("&\\approx", "\\approx");
+            let _ = writeln!(
+                s,
+                "\\noindent\\textbf{{{}:}}\\par\n{}",
+                clean_label(&l.label),
+                centered(&m)
+            );
+        } else {
+            block.push(format!(
+                "  {} && \\text{{{}}}",
+                l.tex,
+                clean_label(&l.label)
+            ));
+            // Klassifikation zur Topologie zusätzlich als Text
+            if l.label.starts_with("Topologie") || l.label.starts_with("Geschlossene") {
+                flush(&mut s, &mut block);
+                let _ = writeln!(s, "\\noindent {}\\par", tex_text(&l.uni));
+            }
+        }
+    }
+    flush(&mut s, &mut block);
+    if !b.errors.is_empty() {
         let _ = writeln!(
             s,
-            "\\begin{{align*}}\n{}\n\\end{{align*}}",
-            lines.join(" \\\\\n")
+            "\\noindent\\emph{{Fehler: {}}}\\par",
+            tex_text(&b.errors.join("; "))
         );
     }
     if !b.legend_tex.is_empty() {
-        let _ = writeln!(s, "mit ${}$.", b.legend_tex.join(",\\quad "));
+        let _ = writeln!(
+            s,
+            "\\noindent mit ${}$.\\par",
+            b.legend_tex.join(",\\quad ")
+        );
     }
     s
 }
 
-pub fn latex_document(objs: &[(&Obj, &Built)]) -> String {
+fn latex_sections(scene: &Scene, secs: &[SectionRes], profs: &[Profile]) -> String {
+    let mut s = String::new();
+    if scene.sections.iter().all(|e| !e.visible) {
+        return s;
+    }
+    let _ = writeln!(s, "\\section*{{Schnittebenen}}");
+    for (pi, sec) in scene.sections.iter().enumerate().filter(|(_, e)| e.visible) {
+        let _ = writeln!(
+            s,
+            "\\subsection*{{{}: ${}$}}",
+            clean_label(&sec.name),
+            analysis::plane_text(sec, true)
+        );
+        let rs: Vec<&SectionRes> = secs.iter().filter(|r| r.plane == pi).collect();
+        if rs.is_empty() {
+            let _ = writeln!(s, "Die Ebene trifft kein sichtbares Objekt.\\par");
+        }
+        for r in rs {
+            let shape = if r.exact {
+                format!("exaktes {}-Eck", r.ngon)
+            } else if r.loops > 1 {
+                format!("{} Schnittkurven, numerisch", r.loops)
+            } else {
+                "numerisch".to_string()
+            };
+            // „&= x“ bzw. „&\approx x“, nie „= ≈“
+            let rel = |t: &str| {
+                if t.starts_with("\\approx") {
+                    format!("&{t}")
+                } else {
+                    format!("&= {t}")
+                }
+            };
+            let body = if r.closed {
+                format!("  A {} \\\\\n  U {}", rel(&r.area_tex), rel(&r.perim_tex))
+            } else {
+                format!(
+                    "  L {} && \\text{{Länge der Schnittkurve{}}}",
+                    rel(&r.perim_tex),
+                    if r.loops > 1 { "n" } else { "" }
+                )
+            };
+            let _ = writeln!(
+                s,
+                "\\paragraph{{{}}} ({})\n\\begin{{align*}}\n{}\n\\end{{align*}}",
+                clean_label(&r.obj),
+                shape,
+                body
+            );
+            if r.exact && !r.points.is_empty() {
+                let pts: Vec<String> = r
+                    .points
+                    .iter()
+                    .take(12)
+                    .map(|p| format!("${}$", p.tex))
+                    .collect();
+                let more = if r.points.len() > 12 {
+                    format!(", \\ldots{{}} ({} insgesamt)", r.points.len())
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(
+                    s,
+                    "\\noindent Ecken des Schnittpolygons: {}{}.\\par",
+                    pts.join(", "),
+                    more
+                );
+                let _ = writeln!(s, "\\noindent\\emph{{Gültig, solange die Ebene dieselben Kanten schneidet (gleicher kombinatorischer Typ).}}\\par");
+            }
+            if !r.note.is_empty() {
+                let _ = writeln!(s, "\\noindent\\emph{{{}}}\\par", tex_text(&r.note));
+            }
+        }
+        for p in profs.iter().filter(|p| p.plane == pi) {
+            let coords: Vec<String> = p
+                .samples
+                .iter()
+                .map(|(h, a)| format!("({h:.5},{a:.5})"))
+                .collect();
+            let rel = if p.volume > 0.0 {
+                (p.integral - p.volume).abs() / p.volume * 100.0
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                s,
+                "\\paragraph{{Cavalieri-Profil {}}}\n\\begin{{center}}\\begin{{tikzpicture}}\n\\begin{{axis}}[width=0.8\\linewidth,height=5cm,xlabel={{$h$}},ylabel={{$A(h)$}},grid=major,thick]\n\\addplot[blue!70!black,mark=none] coordinates {{{}}};\n\\addplot[red!70!black,dashed] coordinates {{({:.5},0) ({:.5},{:.5})}};\n\\end{{axis}}\n\\end{{tikzpicture}}\\end{{center}}\n\\noindent $\\int A(h)\\,dh \\approx {:.6}$, Volumen aus dem Netz $\\approx {:.6}$ (Abweichung {:.3}\\,\\%).\\par",
+                clean_label(&p.obj),
+                coords.join(" "),
+                p.current,
+                p.current,
+                p.samples.iter().map(|x| x.1).fold(0.0, f64::max) * 1.05,
+                p.integral,
+                p.volume,
+                rel
+            );
+        }
+    }
+    s
+}
+
+fn latex_interactions(inters: &[InterRes]) -> String {
+    let mut s = String::new();
+    if inters.is_empty() {
+        return s;
+    }
+    let _ = writeln!(s, "\\section*{{Interaktionen der Verstrebungen}}");
+    for r in inters {
+        let _ = writeln!(
+            s,
+            "\\subsection*{{{} $\\leftrightarrow$ {}}}",
+            clean_label(&r.a),
+            clean_label(&r.b)
+        );
+        let _ = writeln!(
+            s,
+            "\\noindent {}\\par",
+            if r.exact {
+                "Exakt im gemeinsamen Zahlkörper geprüft."
+            } else {
+                "Numerisch (mindestens ein Objekt ohne exakte Koordinaten)."
+            }
+        );
+        if r.is_empty() {
+            match &r.near {
+                Some((d, a, b)) => {
+                    let _ = writeln!(s, "\\noindent Keine Berührung; kleinster Abstand $\\approx {d:.6}$ zwischen {} und {}.\\par", tex_text(a), tex_text(b));
+                }
+                None => {
+                    let _ = writeln!(s, "\\noindent Keine Berührung.\\par");
+                }
+            }
+        }
+        let mut it = String::new();
+        if !r.shared.is_empty() {
+            let pts: Vec<String> = r
+                .shared
+                .iter()
+                .take(12)
+                .map(|p| format!("${}$", p.tex))
+                .collect();
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Gemeinsame Knoten}} ({}): {}",
+                r.shared.len(),
+                pts.join(", ")
+            );
+        }
+        let rel = |t: &str| {
+            if t.starts_with("\\approx") {
+                t.to_string()
+            } else {
+                format!("= {t}")
+            }
+        };
+        let (bundles, rest) = analysis::bundles(&r.crossings);
+        for bu in &bundles {
+            let side = |v: &[(String, usize)]| {
+                v.iter()
+                    .map(|(l, n)| format!("{n}$\\times$ {}", tex_text(l)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut lines = String::new();
+            for (_, t, ang) in &bu.angles {
+                let rhs = if t.starts_with("\\approx") {
+                    t.clone()
+                } else {
+                    format!("= {t}")
+                };
+                let m = format!("\\lvert\\cos\\angle\\rvert {rhs}");
+                if m.len() > LONG {
+                    let _ = writeln!(
+                        lines,
+                        "\\item $\\angle \\approx {ang:.4}^\\circ$:\\\\ {}",
+                        fitmath(&m)
+                    );
+                } else {
+                    let _ = writeln!(lines, "\\item $\\angle \\approx {ang:.4}^\\circ$: ${m}$");
+                }
+            }
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Bündelpunkt}} ${}$: dort treffen sich {} von {} und {} von {}. Paarwinkel zwischen den beiden Objekten ({} verschiedene):\n\\begin{{itemize}}\n{}\\end{{itemize}}",
+                bu.p.tex,
+                side(&bu.a),
+                tex_text(&r.a),
+                side(&bu.b),
+                tex_text(&r.b),
+                bu.angles.len(),
+                lines
+            );
+        }
+        for g in analysis::crossing_groups(&rest) {
+            let pts: Vec<String> = g.6.iter().take(6).map(|p| format!("${}$", p.tex)).collect();
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{{}}} {} $\\times$ {} ({}$\\times$), $\\angle \\approx {:.4}^\\circ$: {} bei {}{}",
+                g.2,
+                tex_text(&g.0),
+                tex_text(&g.1),
+                g.6.len(),
+                g.5,
+                centered(&format!("\\lvert\\cos\\angle\\rvert {}", rel(&g.4))),
+                pts.join(", "),
+                if g.6.len() > 6 { ", \\ldots" } else { "" }
+            );
+        }
+        for p in &r.pierces {
+            // bei einer einzigen Strebe ist „je“ gleich der Gesamtlänge; lange Formeln abgesetzt
+            let each = match &p.each_tex {
+                Some(_) if p.count == 1 => String::new(),
+                Some(e) if e.len() > 90 => format!(", je {}", centered(e)),
+                Some(e) => format!(", je ${e}$"),
+                None => String::new(),
+            };
+            let total = if p.total_tex.starts_with("\\approx") {
+                format!("Innenlänge gesamt ${}$", p.total_tex)
+            } else {
+                format!("Innenlänge gesamt {}", centered(&p.total_tex))
+            };
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{{}}} von {} in {}: {} ({}$\\times${}), {}",
+                tex_text(&p.label),
+                tex_text(&p.owner),
+                tex_text(&p.body),
+                tex_text(p.kind),
+                p.count,
+                each,
+                total
+            );
+        }
+        for (a, b, l) in &r.overlaps {
+            let _ = writeln!(
+                it,
+                "\\item \\textbf{{Überlappung}} {} / {}: gemeinsame Länge $\\approx {l:.6}$",
+                tex_text(a),
+                tex_text(b)
+            );
+        }
+        if let (Some((d, a, b)), false) = (&r.near, r.is_empty()) {
+            let _ = writeln!(
+                it,
+                "\\item Kleinster Abstand nicht berührender Streben $\\approx {d:.6}$ ({} / {})",
+                tex_text(a),
+                tex_text(b)
+            );
+        }
+        if r.near_misses > 0 {
+            let _ = writeln!(
+                it,
+                "\\item {} numerische Beinahe-Treffer, exakt widerlegt",
+                r.near_misses
+            );
+        }
+        for n in &r.notes {
+            let _ = writeln!(it, "\\item \\emph{{{}}}", tex_text(n));
+        }
+        if !it.is_empty() {
+            let _ = writeln!(s, "\\begin{{itemize}}\n{it}\\end{{itemize}}");
+        }
+    }
+    s
+}
+
+pub fn latex_document(
+    objs: &[(&Obj, &Built)],
+    scene: &Scene,
+    secs: &[SectionRes],
+    profs: &[Profile],
+    inters: &[InterRes],
+) -> String {
     let mut s = String::from(
-        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb}\n\\usepackage[a4paper,margin=2cm]{geometry}\n\\begin{document}\n\\section*{Strebwerk: Formeln}\n",
+        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb,graphicx}\n\\usepackage[a4paper,margin=2cm]{geometry}\n\\setlength{\\emergencystretch}{2em}\n",
     );
+    if !profs.is_empty() {
+        s.push_str("\\usepackage{pgfplots}\n\\pgfplotsset{compat=1.18}\n");
+    }
+    s.push_str("\\begin{document}\n\\section*{Strebwerk: Formeln}\n");
     for (o, b) in objs {
         s.push_str(&latex_object(o, b));
         s.push('\n');
     }
+    s.push_str(&latex_sections(scene, secs, profs));
+    s.push_str(&latex_interactions(inters));
     s.push_str("\\end{document}\n");
     s
 }
@@ -237,4 +699,19 @@ pub fn stl_struts(name: &str, segs: &[(DVec3, DVec3)], radius: f64, scale: f64) 
     }
     let _ = writeln!(s, "endsolid {name}");
     s
+}
+
+#[cfg(test)]
+mod tex_tests {
+    #[test]
+    fn hoch_und_tiefstellungen() {
+        assert_eq!(
+            super::tex_text("Kegel ρ⁻¹"),
+            "Kegel \\ensuremath{\\rho}\\ensuremath{^{-1}}"
+        );
+        assert_eq!(
+            super::tex_text("σ₁₀ x²"),
+            "\\ensuremath{\\sigma}\\ensuremath{_{10}} x\\ensuremath{^{2}}"
+        );
+    }
 }

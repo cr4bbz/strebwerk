@@ -1,0 +1,29 @@
+{
+  "format": "strebwerk-1",
+  "scene": {
+    "params": [
+      { "name": "a", "value": 1.0, "min": 0.1, "max": 3.0, "animate": false, "speed": 0.3 },
+      { "name": "s", "value": 0.4, "min": -1.9, "max": 1.9, "animate": false, "speed": 0.15 }
+    ],
+    "gens": [],
+    "objects": [
+      {
+        "id": 1, "name": "Würfel", "visible": true,
+        "kind": { "Polyhedron": { "base": { "Platonic": { "kind": "Cube", "a": "2" } }, "ops": [] } },
+        "offset": ["0", "0", "0"], "color": [120, 170, 255],
+        "layers": { "alpha": 0.18, "space_diag": true }, "hidden_classes": []
+      },
+      {
+        "id": 2, "name": "Oktaeder", "visible": true,
+        "kind": { "Polyhedron": { "base": { "Platonic": { "kind": "Octa", "a": "2sqrt2" } }, "ops": [] } },
+        "offset": ["0", "0", "0"], "color": [255, 160, 90],
+        "layers": { "alpha": 0.18, "space_diag": false }, "hidden_classes": []
+      }
+    ],
+    "next_id": 2,
+    "sections": [
+      { "name": "E1", "normal": ["0", "0", "1"], "offset": "s", "visible": true, "profile": true }
+    ]
+  },
+  "camera": { "target": [0.0, 0.0, 0.0], "dist": 7.2, "yaw": 0.5, "pitch": 0.38, "fov": 0.6981317, "ortho": false }
+}
