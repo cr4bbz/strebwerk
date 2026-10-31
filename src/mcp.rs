@@ -1330,7 +1330,7 @@ pub fn tools() -> Vec<Value> {
             json!({ "id": { "type": "integer" } }), &[], true),
         tool("sections", "Alle Schnittebenen mit allen sichtbaren Objekten auswerten (exakt, wo möglich).", json!({}), &[], true),
         tool("interactions", "Wie die Streben verschiedener Objekte zusammenwirken: gemeinsame Knoten, Kreuzungen und Stöße mit exaktem Punkt und |cos ∠|, Bündelpunkte, Durchstoßungen mit exakter Innenlänge, Überlappungen, kleinste Abstände.", json!({}), &[], true),
-        tool("evaluate", "Ausdruck exakt vereinfachen (inkl. Potenzform), z. B. \"rho^2 - 1\" → ρ^(-1), \"sqrt(2+2*rho+2*rho^2)\" → √2·ρ^(5/2), \"cos(2*pi/5)\".",
+        tool("evaluate", "Ausdruck exakt vereinfachen (inkl. Potenzform), z. B. \"rho^2 - 1\" → ρ⁻¹, \"sqrt(2+2*rho+2*rho^2)\" → √2·ρ^(5/2), \"cos(2*pi/5)\".",
             json!({ "expr": { "type": "string" } }), &["expr"], true),
         tool("distance", "Exakter Abstand zweier Punkte (mit Potenzform).",
             json!({ "a": vec3_schema("Punkt P"), "b": vec3_schema("Punkt Q") }), &["a", "b"], true),
@@ -1509,8 +1509,8 @@ mod tests {
         assert!(out.contains("#1"), "{out}");
         let a = call(&mut s, "analyze", json!({})).unwrap();
         assert!(a.contains("ρ^(5/2)"), "{a}");
-        assert!(a.contains("√2·ρ^(-4)"), "{a}");
-        assert!(a.contains("1/3·ρ^(-1)"), "{a}");
+        assert!(a.contains("√2·ρ⁻⁴"), "{a}");
+        assert!(a.contains("1/3·ρ⁻¹"), "{a}");
         let d = call(
             &mut s,
             "distance",
@@ -1519,7 +1519,7 @@ mod tests {
         .unwrap();
         assert!(d.contains("|PQ| = √2"), "{d}");
         let e = call(&mut s, "evaluate", json!({ "expr": "rho^2 - 1" })).unwrap();
-        assert!(e.contains("ρ^(-1)"), "{e}");
+        assert!(e.contains("ρ⁻¹"), "{e}");
         let w = call(
             &mut s,
             "angle",

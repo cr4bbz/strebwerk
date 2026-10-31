@@ -487,7 +487,7 @@ pub fn latex_document(
     inters: &[InterRes],
 ) -> String {
     let mut s = String::from(
-        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb,graphicx}\n\\usepackage[a4paper,margin=2cm]{geometry}\n",
+        "% Erzeugt mit Strebwerk\n\\documentclass[11pt]{article}\n\\usepackage[ngerman]{babel}\n\\usepackage{amsmath,amssymb,graphicx}\n\\usepackage[a4paper,margin=2cm]{geometry}\n\\setlength{\\emergencystretch}{2em}\n",
     );
     if !profs.is_empty() {
         s.push_str("\\usepackage{pgfplots}\n\\pgfplotsset{compat=1.18}\n");

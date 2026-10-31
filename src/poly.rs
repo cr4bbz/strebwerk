@@ -279,28 +279,84 @@ fn subscript_n(n: usize) -> String {
         .collect()
 }
 
+/// Potenzform von x (bzw. √x bei `sqrt`): x = A·gᵐ·M mit A ∈ ℚ, einem Generator g und einem
+/// Monom M in den Parametern, z. B. (1 + ρ − ρ²)s² = ρ⁻²·s², −1 − ρ = −ρ³.
+/// Bei `sqrt` muss M ein Quadrat nichtnegativer Parameter sein.
+pub fn power_str(r: &Ring, x: &Poly, sqrt: bool, tex: bool) -> Option<String> {
+    let ng = r.ng();
+    let mut mono: Option<Vec<u32>> = None;
+    let mut c = Poly::zero();
+    for (e, q) in &x.t {
+        let pe = e[ng..].to_vec();
+        match &mono {
+            None => mono = Some(pe.clone()),
+            Some(m) if *m != pe => return None,
+            _ => {}
+        }
+        let mut ge = e.clone();
+        for v in ge[ng..].iter_mut() {
+            *v = 0;
+        }
+        c = c.add(&Poly::monomial(ge, q.clone()));
+    }
+    let mono = mono?;
+    // ein einzelner Term (aφ, 2ρ²s) ist schon seine eigene Potenzform
+    if !sqrt && c.t.len() == 1 {
+        return None;
+    }
+    let (a, gi, m) = r.power_form(&c)?;
+    let neg = a < qi(0);
+    if neg && sqrt {
+        return None;
+    }
+    let pw = r.fmt_power(&if neg { -a } else { a }, gi, m, sqrt, tex);
+    let mut out = if neg { format!("−{pw}") } else { pw };
+    if tex && neg {
+        out = format!("-{}", &out["−".len()..]);
+    }
+    if mono.iter().any(|&k| k > 0) {
+        let mut half = vec![0u32; ng];
+        for (i, &k) in mono.iter().enumerate() {
+            if sqrt && (k % 2 == 1 || !r.params[i].nonneg) {
+                return None;
+            }
+            half.push(if sqrt { k / 2 } else { k });
+        }
+        let ms = r.fmt_poly(&Poly::monomial(half, qi(1)), tex);
+        out = if tex {
+            format!("{out}\\,{ms}")
+        } else {
+            format!("{out}·{ms}")
+        };
+    }
+    Some(out)
+}
+
+fn rad_power(r: &Ring, rad: &Radical, tex: bool) -> Option<String> {
+    if rad.absm.is_some() || !rad.outside.den.is_one() {
+        return None;
+    }
+    let neg = r.seval(&rad.outside) < 0.0;
+    let o2 = r.mul(&rad.outside.num, &rad.outside.num);
+    let x = match &rad.inside {
+        Some(i) => r.mul(&o2, i),
+        None => return power_str(r, &rad.outside.num, false, tex),
+    };
+    let p = power_str(r, &x, true, tex)?;
+    Some(if neg {
+        format!("{}{p}", if tex { "-" } else { "−" })
+    } else {
+        p
+    })
+}
+
 /// Kanonische Form, ergänzt um die Potenzform, wenn der Wert eine reine Potenz eines
 /// Generators ist: √(2 + 2ρ + 2ρ²) = √2·ρ^(5/2), ρ + ρ² = ρ⁴.
 pub fn rad_str(r: &Ring, rad: &Radical, tex: bool) -> String {
     let base = r.fmt_rad(rad, tex);
-    if rad.absm.is_some() || !rad.outside.den.is_one() || r.seval(&rad.outside) < 0.0 {
-        return base;
-    }
-    let o2 = r.mul(&rad.outside.num, &rad.outside.num);
-    let x = match &rad.inside {
-        Some(i) => r.mul(&o2, i),
-        None => o2,
-    };
-    match r.power_form(&x) {
-        Some((a, gi, m)) => {
-            let p = r.fmt_power(&a, gi, m, true, tex);
-            if p == base {
-                base
-            } else {
-                format!("{base} = {p}")
-            }
-        }
-        None => base,
+    match rad_power(r, rad, tex) {
+        Some(p) if p != base => format!("{base} = {p}"),
+        _ => base,
     }
 }
 
@@ -309,16 +365,56 @@ pub fn sym_str(r: &Ring, s: &Sym, tex: bool) -> String {
     if !s.den.is_one() {
         return base;
     }
-    match r.power_form(&s.num) {
-        Some((a, gi, m)) => {
-            let p = r.fmt_power(&a, gi, m, false, tex);
-            if p == base {
-                base
-            } else {
-                format!("{base} = {p}")
+    match power_str(r, &s.num, false, tex) {
+        Some(p) if p != base => format!("{base} = {p}"),
+        _ => base,
+    }
+}
+
+/// Nur die kürzere Form (für Koordinaten in Punktlisten): −1 − ρ → −ρ³.
+pub fn sym_short(r: &Ring, s: &Sym, tex: bool) -> String {
+    let base = r.fmt_sym(s, tex);
+    if !s.den.is_one() {
+        return base;
+    }
+    match power_str(r, &s.num, false, tex) {
+        Some(p) if p.chars().count() < base.chars().count() => p,
+        _ => base,
+    }
+}
+
+/// Summe von Radikalen; gleichartige Summanden in Potenzform, und die ganze Summe, falls sie
+/// selbst ein einzelnes Radikal mit Potenzform ist.
+pub fn rad_sum_str(r: &Ring, rs: &[Radical], tex: bool) -> String {
+    let base = r.fmt_rad_sum(rs, tex);
+    if rs.len() == 1 {
+        return rad_str(r, &rs[0], tex);
+    }
+    let mut short = String::new();
+    let mut changed = false;
+    for (i, x) in rs.iter().enumerate() {
+        let full = r.fmt_rad(x, tex);
+        let t = match rad_power(r, x, tex) {
+            Some(p) if p.chars().count() < full.chars().count() => {
+                changed = true;
+                p
             }
+            _ => full,
+        };
+        let minus = if tex { "-" } else { "−" };
+        if i == 0 {
+            short.push_str(&t);
+        } else if let Some(rest) = t.strip_prefix('−').or_else(|| t.strip_prefix('-')) {
+            short.push_str(&format!(" {minus} {rest}"));
+        } else {
+            short.push_str(" + ");
+            short.push_str(&t);
         }
-        None => base,
+    }
+    if changed && short != base {
+        format!("{base} = {short}")
+    } else {
+        base
     }
 }
 
@@ -556,8 +652,8 @@ pub fn analyze_polyhedron(r: &Ring, ex: &[V3], num: &[DVec3], hull: &Hull) -> An
     let surf_num: f64 = surf.iter().map(|x| r.rad_eval(x)).sum();
     a.lines.push(FLine {
         label: "Oberfläche O".into(),
-        uni: r.fmt_rad_sum(&surf, false),
-        tex: format!("O &= {}", r.fmt_rad_sum(&surf, true)),
+        uni: rad_sum_str(r, &surf, false),
+        tex: format!("O &= {}", rad_sum_str(r, &surf, true)),
         num: Some(surf_num),
         val: Some(ValSrc::Sum(surf.clone())),
         ..Default::default()
@@ -1032,5 +1128,82 @@ mod tests {
         let h = convex_hull(&pts).unwrap();
         assert_eq!(h.faces.len(), 6);
         assert!(h.faces.iter().all(|f| f.len() == 4));
+    }
+}
+
+#[cfg(test)]
+mod power_tests {
+    use crate::scene::*;
+
+    fn run(tpl_pts: Vec<[&str; 3]>) -> (Scene, Vec<(Obj, Built)>) {
+        let mut sc = default_scene();
+        sc.objects.clear();
+        sc.add(
+            "W",
+            Kind::Polyhedron {
+                base: PolyBase::Platonic {
+                    kind: Platonic::Cube,
+                    a: "2+2*rho".into(),
+                },
+                ops: vec![],
+            },
+        );
+        sc.add(
+            "K",
+            Kind::Free {
+                pts: tpl_pts
+                    .iter()
+                    .map(|p| [p[0].to_string(), p[1].to_string(), p[2].to_string()])
+                    .collect(),
+                struts: vec![],
+                hull: true,
+            },
+        );
+        sc.params.push(Param {
+            name: "s".into(),
+            value: 0.5,
+            min: 0.0,
+            max: 2.0,
+            animate: false,
+            speed: 0.3,
+            dir: 1.0,
+        });
+        sc.sections.push(Section::new("E", 0, "s"));
+        let mut cache = Cache::new();
+        let built = sc
+            .objects
+            .iter()
+            .map(|o| (o.clone(), build(o, &sc, &mut cache)))
+            .collect();
+        (sc, built)
+    }
+
+    #[test]
+    fn potenzformen_in_schnitten() {
+        let (sc, built) = run(vec![
+            ["0", "0", "0"],
+            ["1", "rho", "rho^3"],
+            ["rho", "rho^3", "1"],
+            ["1", "rho^3", "rho"],
+        ]);
+        let vis: Vec<(&Obj, &Built)> = built.iter().map(|(o, b)| (o, b)).collect();
+        let (secs, _, inters) = crate::analysis::analyze_all(&sc, &vis, true);
+        let w = secs.iter().find(|r| r.obj == "W").unwrap();
+        assert_eq!(w.area_uni, "4 + 8ρ + 4ρ² = 4·ρ⁶");
+        assert_eq!(w.perim_uni, "8 + 8ρ = 8·ρ³");
+        assert_eq!(w.points[0].uni, "(s, −ρ³, −ρ³)");
+        let k = secs.iter().find(|r| r.obj == "K").unwrap();
+        assert_eq!(k.area_uni, "(1 + ρ − ρ²)s² = ρ⁻²·s²");
+        assert!(
+            k.points.iter().any(|p| p.uni == "(s, sρ², ρ⁻¹·s)"),
+            "{:?}",
+            k.points
+        );
+        let p = &inters[0].pierces;
+        let k4 = p.iter().find(|g| g.label == "Kante 4").unwrap();
+        assert_eq!(k4.each_uni.as_deref(), Some("√(2 + 2ρ + 2ρ²) = √2·ρ^(5/2)"));
+        assert_eq!(k4.total_uni, "3√(2 + 2ρ + 2ρ²) = 3·√2·ρ^(5/2)");
+        let k1 = p.iter().find(|g| g.label == "Kante 1").unwrap();
+        assert_eq!(k1.each_uni.as_deref(), Some("(ρ − 1)√2 = √2·ρ⁻⁴"));
     }
 }

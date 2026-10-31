@@ -1349,6 +1349,8 @@ impl Ring {
                 format!("{base}^{{{e}}}")
             } else if den == 1 && num > 0 {
                 format!("{base}{}", superscript(num as u32))
+            } else if den == 1 {
+                format!("{base}⁻{}", superscript(num.unsigned_abs() as u32))
             } else {
                 format!("{base}^({e})")
             }

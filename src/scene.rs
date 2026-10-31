@@ -2757,7 +2757,7 @@ mod tests {
     fn icosahedron_exact() {
         let b = build_tpl("Ikosaeder");
         // V = 5(3+√5)/12 a³ = (5/6)(1+φ)a³ = 5/6·φ² a³
-        assert_eq!(line(&b, "Volumen").uni, "(5/6 + 5/6·φ)a³");
+        assert_eq!(line(&b, "Volumen").uni, "(5/6 + 5/6·φ)a³ = 5/6·φ²·a³");
         assert_eq!(line(&b, "Euler").uni, "V − E + F = 12 − 30 + 20 = 2");
         assert!(line(&b, "Symmetriegruppe")
             .uni

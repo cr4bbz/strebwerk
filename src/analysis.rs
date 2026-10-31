@@ -18,8 +18,8 @@ pub struct Pt {
 }
 
 fn pt_exact(r: &Ring, v: &V3) -> Pt {
-    let u: Vec<String> = v.iter().map(|x| r.fmt_sym(x, false)).collect();
-    let t: Vec<String> = v.iter().map(|x| r.fmt_sym(x, true)).collect();
+    let u: Vec<String> = v.iter().map(|x| poly::sym_short(r, x, false)).collect();
+    let t: Vec<String> = v.iter().map(|x| poly::sym_short(r, x, true)).collect();
     Pt {
         p: poly::v3_eval(r, v),
         uni: format!("({})", u.join(", ")),
@@ -357,11 +357,11 @@ fn exact_section(
         closed: true,
         ngon: k,
         area: r.rad_eval(&area),
-        area_uni: r.fmt_rad(&area, false),
-        area_tex: r.fmt_rad(&area, true),
+        area_uni: poly::rad_str(&r, &area, false),
+        area_tex: poly::rad_str(&r, &area, true),
         perim: perim.iter().map(|x| r.rad_eval(x)).sum(),
-        perim_uni: r.fmt_rad_sum(&perim, false),
-        perim_tex: r.fmt_rad_sum(&perim, true),
+        perim_uni: poly::rad_sum_str(&r, &perim, false),
+        perim_tex: poly::rad_sum_str(&r, &perim, true),
         points: pts.iter().map(|p| pt_exact(&r, p)).collect(),
         loops: 1,
         note: String::new(),
@@ -1032,17 +1032,17 @@ fn pierce(
                 });
                 (
                     if same {
-                        Some(r.fmt_rad(&rads[0], false))
+                        Some(poly::rad_str(r, &rads[0], false))
                     } else {
                         None
                     },
                     if same {
-                        Some(r.fmt_rad(&rads[0], true))
+                        Some(poly::rad_str(r, &rads[0], true))
                     } else {
                         None
                     },
-                    r.fmt_rad_sum(&sum, false),
-                    r.fmt_rad_sum(&sum, true),
+                    poly::rad_sum_str(r, &sum, false),
+                    poly::rad_sum_str(r, &sum, true),
                 )
             }
             _ => (
